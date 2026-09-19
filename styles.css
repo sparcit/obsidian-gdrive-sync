@@ -1,0 +1,179 @@
+/* Obsidian Google Drive Sync Styles */
+
+/* Ribbon Icon Animations */
+.gdrive-sync-ribbon.is-syncing svg {
+  animation: gdrive-sync-spin 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  color: var(--interactive-accent);
+}
+
+@keyframes gdrive-sync-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.gdrive-sync-ribbon.sync-error svg {
+  color: var(--text-error);
+}
+
+.gdrive-sync-ribbon.sync-success svg {
+  color: var(--text-success);
+}
+
+/* Status Bar Item */
+.gdrive-sync-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--font-ui-smaller);
+  transition: opacity 0.2s ease;
+}
+
+.gdrive-sync-status-bar:hover {
+  opacity: 0.85;
+}
+
+.gdrive-sync-status-icon {
+  display: inline-flex;
+  align-items: center;
+  width: 14px;
+  height: 14px;
+}
+
+.gdrive-sync-status-icon.is-syncing svg {
+  animation: gdrive-sync-spin 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  color: var(--interactive-accent);
+}
+
+/* Auth Modal Styling */
+.gdrive-auth-modal {
+  padding: 10px 0;
+}
+
+.gdrive-auth-modal-header {
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text-normal);
+}
+
+.gdrive-auth-step-box {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 12px 0;
+}
+
+.gdrive-auth-code-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 12px;
+  background-color: var(--background-primary);
+  border: 1px dashed var(--interactive-accent);
+  border-radius: 6px;
+}
+
+.gdrive-auth-user-code {
+  font-family: var(--font-monospace);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--interactive-accent);
+  user-select: all;
+}
+
+.gdrive-auth-button-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.gdrive-auth-polling-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  margin-top: 12px;
+}
+
+.gdrive-auth-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--background-modifier-border);
+  border-top-color: var(--interactive-accent);
+  border-radius: 50%;
+  animation: gdrive-sync-spin 1s linear infinite;
+}
+
+/* Settings Tab Enhancements */
+.gdrive-status-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.gdrive-status-badge.connected {
+  background-color: rgba(var(--color-green-rgb), 0.15);
+  color: var(--text-success);
+  border: 1px solid rgba(var(--color-green-rgb), 0.3);
+}
+
+.gdrive-status-badge.disconnected {
+  background-color: rgba(var(--color-red-rgb), 0.15);
+  color: var(--text-error);
+  border: 1px solid rgba(var(--color-red-rgb), 0.3);
+}
+
+.gdrive-settings-card {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.gdrive-account-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.gdrive-account-email {
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.gdrive-account-detail {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.gdrive-sync-log-box {
+  background-color: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 10px;
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  max-height: 140px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+  user-select: text;
+}
