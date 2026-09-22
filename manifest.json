@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
   "description": "Two-way synchronization for your Obsidian vault with Google Drive across Android, iOS, and desktop.",
-  "author": "Antigravity & Aby",
-  "authorUrl": "https://github.com",
+  "author": "sparcit",
+  "authorUrl": "https://github.com/sparcit/obsidian-gdrive-sync",
   "isDesktopOnly": false
 }

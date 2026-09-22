@@ -41,7 +41,7 @@ This plugin extracts and adapts the pertinent architectural designs and sync rec
 1. In Obsidian, install and enable the community plugin **Obsidian42 - BRAT**.
 2. Open Obsidian Settings $\rightarrow$ **BRAT**.
 3. Click **Add Beta plugin**.
-4. Enter the repository URL: `https://github.com/aby/obsidian_gdrive_sync` (or your repository link).
+4. Enter the repository URL: `https://github.com/sparcit/obsidian-gdrive-sync`.
 5. Click **Add Plugin**. BRAT will download `manifest.json`, `main.js`, and `styles.css`.
 6. Go to **Community Plugins** in Obsidian and enable **Google Drive Sync**.
 
