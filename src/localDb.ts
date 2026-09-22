@@ -17,9 +17,19 @@ export class LocalDb {
       const data = await this.plugin.loadData();
       if (data && data.syncRecords) {
         this.records.clear();
-        for (const [key, record] of Object.entries(
-          data.syncRecords as Record<string, SyncRecord>
+        for (const [key, raw] of Object.entries(
+          data.syncRecords as Record<string, any>
         )) {
+          const record: SyncRecord = {
+            key: raw.key,
+            isFolder: raw.isFolder,
+            localSize: raw.localSize ?? raw.size ?? 0,
+            localMtime: raw.localMtime ?? raw.mtime ?? 0,
+            remoteHash: raw.remoteHash ?? raw.hash,
+            remoteMtime: raw.remoteMtime ?? raw.mtime,
+            remoteSize: raw.remoteSize ?? raw.size,
+            syncTime: raw.syncTime ?? 0,
+          };
           this.records.set(key, record);
         }
       }

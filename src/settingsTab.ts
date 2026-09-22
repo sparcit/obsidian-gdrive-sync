@@ -98,6 +98,39 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
             });
         });
     } else {
+      // Prompt user to provide Client ID and Secret before connecting
+      new Setting(card)
+        .setName("Google OAuth Credentials")
+        .setDesc(
+          "Enter your Google Cloud OAuth 2.0 Client ID and Secret (type: 'TVs and Limited Input devices')."
+        );
+
+      new Setting(card)
+        .setName("Google Client ID")
+        .setDesc("Client ID from your Google Cloud Console project")
+        .addText((text) => {
+          text
+            .setPlaceholder("e.g. 123456789-abcdef.apps.googleusercontent.com")
+            .setValue(this.plugin.settings.googleDrive.clientId)
+            .onChange(async (val) => {
+              this.plugin.settings.googleDrive.clientId = val.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+
+      new Setting(card)
+        .setName("Google Client Secret")
+        .setDesc("Required by Google OAuth 2.0 Device Flow")
+        .addText((text) => {
+          text
+            .setPlaceholder("GOCSPX-...")
+            .setValue(this.plugin.settings.googleDrive.clientSecret)
+            .onChange(async (val) => {
+              this.plugin.settings.googleDrive.clientSecret = val.trim();
+              await this.plugin.saveSettings();
+            });
+        });
+
       new Setting(card)
         .setName("Connect to Google Drive")
         .setDesc(
@@ -108,19 +141,29 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
             .setButtonText("Connect Account")
             .setCta()
             .onClick(async () => {
+              const { clientId, clientSecret, scope } =
+                this.plugin.settings.googleDrive;
+
+              if (!clientId || !clientSecret) {
+                new Notice(
+                  "Please enter both your Google Client ID and Client Secret before connecting."
+                );
+                return;
+              }
+
               btn.setDisabled(true);
               try {
                 const deviceResp =
                   await GoogleOAuthDeviceFlow.requestDeviceCode(
-                    this.plugin.settings.googleDrive.clientId,
-                    this.plugin.settings.googleDrive.scope
+                    clientId,
+                    scope
                   );
 
                 new DeviceAuthModal(
                   this.app,
                   deviceResp,
-                  this.plugin.settings.googleDrive.clientId,
-                  this.plugin.settings.googleDrive.clientSecret,
+                  clientId,
+                  clientSecret,
                   async (tokens) => {
                     this.plugin.settings.googleDrive.refreshToken =
                       tokens.refreshToken;
@@ -153,37 +196,11 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
         });
     }
 
-    // Advanced Credentials Dropdown
+    // Manual Refresh Token Section (Alternative setup)
     const advancedDetails = containerEl.createEl("details");
     advancedDetails.createEl("summary", {
-      text: "Advanced OAuth Credentials (Optional)",
+      text: "Manual Token Entry (Alternative)",
     });
-
-    new Setting(advancedDetails)
-      .setName("Google Client ID")
-      .setDesc("Custom Google Cloud OAuth Client ID (Device type)")
-      .addText((text) => {
-        text
-          .setPlaceholder("Enter client_id")
-          .setValue(this.plugin.settings.googleDrive.clientId)
-          .onChange(async (val) => {
-            this.plugin.settings.googleDrive.clientId = val.trim();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(advancedDetails)
-      .setName("Google Client Secret")
-      .setDesc("Optional for TV/Device client IDs")
-      .addText((text) => {
-        text
-          .setPlaceholder("Enter client_secret")
-          .setValue(this.plugin.settings.googleDrive.clientSecret)
-          .onChange(async (val) => {
-            this.plugin.settings.googleDrive.clientSecret = val.trim();
-            await this.plugin.saveSettings();
-          });
-      });
 
     new Setting(advancedDetails)
       .setName("Manual Refresh Token")

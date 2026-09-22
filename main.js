@@ -722,9 +722,19 @@ var LocalDb = class {
       const data = await this.plugin.loadData();
       if (data && data.syncRecords) {
         this.records.clear();
-        for (const [key, record] of Object.entries(
+        for (const [key, raw] of Object.entries(
           data.syncRecords
         )) {
+          const record = {
+            key: raw.key,
+            isFolder: raw.isFolder,
+            localSize: raw.localSize ?? raw.size ?? 0,
+            localMtime: raw.localMtime ?? raw.mtime ?? 0,
+            remoteHash: raw.remoteHash ?? raw.hash,
+            remoteMtime: raw.remoteMtime ?? raw.mtime,
+            remoteSize: raw.remoteSize ?? raw.size,
+            syncTime: raw.syncTime ?? 0
+          };
           this.records.set(key, record);
         }
       }
@@ -894,7 +904,21 @@ var SyncEngine = class {
   }
   decideFile(key, local, remote, prev, direction = "bidirectional", conflictAction = "keep_newer") {
     if (local && remote) {
-      const isIdentical = local.size === remote.size && (Math.abs(local.mtime - remote.mtime) <= 1500 || local.hash && remote.hash && local.hash === remote.hash);
+      const localUnchanged = prev && local.size === prev.localSize && Math.abs(local.mtime - prev.localMtime) <= 1500;
+      const remoteUnchanged = prev && (prev.remoteHash && remote.hash ? remote.hash === prev.remoteHash : remote.size === prev.remoteSize && Math.abs(remote.mtime - (prev.remoteMtime ?? 0)) <= 1500);
+      if (prev && localUnchanged && remoteUnchanged) {
+        return {
+          key,
+          isFolder: false,
+          action: "equal",
+          localEntity: local,
+          remoteEntity: remote,
+          prevRecord: prev,
+          reason: "Neither local nor remote file has changed since last sync",
+          isChange: false
+        };
+      }
+      const isIdentical = local.size === remote.size && (local.hash && remote.hash && local.hash === remote.hash || Math.abs(local.mtime - remote.mtime) <= 1500);
       if (isIdentical) {
         return {
           key,
@@ -902,12 +926,11 @@ var SyncEngine = class {
           action: "equal",
           localEntity: local,
           remoteEntity: remote,
+          prevRecord: prev,
           reason: "File is identical on both sides",
           isChange: false
         };
       }
-      const localUnchanged = prev && local.size === prev.size && Math.abs(local.mtime - prev.mtime) <= 1500;
-      const remoteUnchanged = prev && remote.size === prev.size && (Math.abs(remote.mtime - prev.mtime) <= 1500 || prev.hash && remote.hash && prev.hash === remote.hash);
       if (localUnchanged && !remoteUnchanged) {
         if (direction === "push_only") {
           return { key, isFolder: false, action: "skip", reason: "Remote modified; push only skips", isChange: false };
@@ -1018,6 +1041,21 @@ var SyncEngine = class {
     }
     if (local && !remote) {
       if (prev) {
+        const localModifiedSincePrev = local.size !== prev.localSize || Math.abs(local.mtime - prev.localMtime) > 1500;
+        if (localModifiedSincePrev) {
+          if (direction === "pull_only") {
+            return { key, isFolder: false, action: "skip", reason: "Local modified but remote deleted; pull only skips", isChange: false };
+          }
+          return {
+            key,
+            isFolder: false,
+            action: "upload",
+            localEntity: local,
+            prevRecord: prev,
+            reason: "Local file was modified after remote deletion (edit wins over delete)",
+            isChange: true
+          };
+        }
         if (direction === "push_only") {
           return { key, isFolder: false, action: "skip", reason: "Deleted remotely; push only skips", isChange: false };
         }
@@ -1046,6 +1084,21 @@ var SyncEngine = class {
     }
     if (!local && remote) {
       if (prev) {
+        const remoteModifiedSincePrev = prev.remoteHash && remote.hash ? remote.hash !== prev.remoteHash : remote.size !== prev.remoteSize || Math.abs(remote.mtime - (prev.remoteMtime ?? 0)) > 1500;
+        if (remoteModifiedSincePrev) {
+          if (direction === "push_only") {
+            return { key, isFolder: false, action: "skip", reason: "Remote modified but local deleted; push only skips", isChange: false };
+          }
+          return {
+            key,
+            isFolder: false,
+            action: "download",
+            remoteEntity: remote,
+            prevRecord: prev,
+            reason: "Remote file was modified after local deletion (edit wins over delete)",
+            isChange: true
+          };
+        }
         if (direction === "pull_only") {
           return { key, isFolder: false, action: "skip", reason: "Deleted locally; pull only skips", isChange: false };
         }
@@ -1087,6 +1140,24 @@ var SyncEngine = class {
     this.checkSafetyGuard(decisions);
     const errors = [];
     let syncedCount = 0;
+    const now = Date.now();
+    for (const d of decisions) {
+      if (d.action === "equal") {
+        const existing = this.db.getRecord(d.key);
+        if (!existing) {
+          this.db.upsertRecord({
+            key: d.key,
+            isFolder: d.isFolder,
+            localSize: d.localEntity?.size ?? 0,
+            localMtime: d.localEntity?.mtime ?? now,
+            remoteHash: d.remoteEntity?.hash,
+            remoteMtime: d.remoteEntity?.mtime,
+            remoteSize: d.remoteEntity?.size,
+            syncTime: now
+          });
+        }
+      }
+    }
     const activeChanges = decisions.filter((d) => d.isChange);
     const totalCount = activeChanges.length;
     const folderCreations = activeChanges.filter(
@@ -1103,8 +1174,10 @@ var SyncEngine = class {
         this.db.upsertRecord({
           key: d.key,
           isFolder: true,
-          size: 0,
-          mtime: Date.now(),
+          localSize: 0,
+          localMtime: Date.now(),
+          remoteMtime: Date.now(),
+          remoteSize: 0,
           syncTime: Date.now()
         });
         syncedCount++;
@@ -1191,12 +1264,15 @@ var SyncEngine = class {
           content,
           d.localEntity?.mtime
         );
+        const localStat = await this.localFs.stat(d.key);
         this.db.upsertRecord({
           key: d.key,
           isFolder: false,
-          size: content.byteLength,
-          mtime: uploaded.mtime,
-          hash: uploaded.hash,
+          localSize: content.byteLength,
+          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
+          remoteHash: uploaded.hash,
+          remoteMtime: uploaded.mtime,
+          remoteSize: uploaded.size,
           syncTime: now
         });
         break;
@@ -1205,12 +1281,15 @@ var SyncEngine = class {
       case "conflict_keep_remote": {
         const content = await this.driveApi.readFile(d.key);
         await this.localFs.writeFile(d.key, content);
+        const localStat = await this.localFs.stat(d.key);
         this.db.upsertRecord({
           key: d.key,
           isFolder: false,
-          size: content.byteLength,
-          mtime: d.remoteEntity?.mtime || now,
-          hash: d.remoteEntity?.hash,
+          localSize: content.byteLength,
+          localMtime: localStat?.mtime ?? now,
+          remoteHash: d.remoteEntity?.hash,
+          remoteMtime: d.remoteEntity?.mtime,
+          remoteSize: d.remoteEntity?.size ?? content.byteLength,
           syncTime: now
         });
         break;
@@ -1223,23 +1302,29 @@ var SyncEngine = class {
             content,
             d.localEntity.mtime
           );
+          const localStat = await this.localFs.stat(d.key);
           this.db.upsertRecord({
             key: d.key,
             isFolder: false,
-            size: content.byteLength,
-            mtime: uploaded.mtime,
-            hash: uploaded.hash,
+            localSize: content.byteLength,
+            localMtime: localStat?.mtime ?? d.localEntity.mtime,
+            remoteHash: uploaded.hash,
+            remoteMtime: uploaded.mtime,
+            remoteSize: uploaded.size,
             syncTime: now
           });
         } else {
           const content = await this.driveApi.readFile(d.key);
           await this.localFs.writeFile(d.key, content);
+          const localStat = await this.localFs.stat(d.key);
           this.db.upsertRecord({
             key: d.key,
             isFolder: false,
-            size: content.byteLength,
-            mtime: d.remoteEntity?.mtime || now,
-            hash: d.remoteEntity?.hash,
+            localSize: content.byteLength,
+            localMtime: localStat?.mtime ?? now,
+            remoteHash: d.remoteEntity?.hash,
+            remoteMtime: d.remoteEntity?.mtime,
+            remoteSize: d.remoteEntity?.size ?? content.byteLength,
             syncTime: now
           });
         }
@@ -1249,18 +1334,22 @@ var SyncEngine = class {
         const remoteContent = await this.driveApi.readFile(d.key);
         const conflictKey = this.generateConflictPath(d.key);
         await this.localFs.writeFile(conflictKey, remoteContent);
+        const conflictStat = await this.localFs.stat(conflictKey);
         const localContent = await this.localFs.readFile(d.key);
         const uploaded = await this.driveApi.writeFile(
           d.key,
           localContent,
           d.localEntity?.mtime
         );
+        const localStat = await this.localFs.stat(d.key);
         this.db.upsertRecord({
           key: d.key,
           isFolder: false,
-          size: localContent.byteLength,
-          mtime: uploaded.mtime,
-          hash: uploaded.hash,
+          localSize: localContent.byteLength,
+          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
+          remoteHash: uploaded.hash,
+          remoteMtime: uploaded.mtime,
+          remoteSize: uploaded.size,
           syncTime: now
         });
         const uploadedConflict = await this.driveApi.writeFile(
@@ -1271,9 +1360,11 @@ var SyncEngine = class {
         this.db.upsertRecord({
           key: conflictKey,
           isFolder: false,
-          size: remoteContent.byteLength,
-          mtime: uploadedConflict.mtime,
-          hash: uploadedConflict.hash,
+          localSize: remoteContent.byteLength,
+          localMtime: conflictStat?.mtime ?? now,
+          remoteHash: uploadedConflict.hash,
+          remoteMtime: uploadedConflict.mtime,
+          remoteSize: uploadedConflict.size,
           syncTime: now
         });
         break;
@@ -1283,9 +1374,11 @@ var SyncEngine = class {
           this.db.upsertRecord({
             key: d.key,
             isFolder: false,
-            size: d.localEntity.size,
-            mtime: d.localEntity.mtime,
-            hash: d.remoteEntity?.hash,
+            localSize: d.localEntity.size,
+            localMtime: d.localEntity.mtime,
+            remoteHash: d.remoteEntity?.hash,
+            remoteMtime: d.remoteEntity?.mtime,
+            remoteSize: d.remoteEntity?.size,
             syncTime: now
           });
         }
@@ -1336,6 +1429,9 @@ var GoogleOAuthDeviceFlow = class {
    * Initiates the OAuth 2.0 Device Code Flow
    */
   static async requestDeviceCode(clientId, scope) {
+    if (!clientId) {
+      throw new Error("Missing Google Client ID. Please configure it in plugin settings.");
+    }
     const params = new URLSearchParams({
       client_id: clientId,
       scope
@@ -1359,6 +1455,9 @@ var GoogleOAuthDeviceFlow = class {
    * Polls Google token endpoint until user approves or denies
    */
   static async pollForTokens(clientId, clientSecret, deviceCode, intervalSeconds, expiresInSeconds, isCancelled, onStatusUpdate) {
+    if (!clientSecret) {
+      throw new Error("Missing Google Client Secret. Google requires client_secret for device code authentication.");
+    }
     const deadline = Date.now() + expiresInSeconds * 1e3;
     let pollInterval = Math.max(intervalSeconds, 5);
     while (Date.now() < deadline) {
@@ -1576,21 +1675,43 @@ var GDriveSyncSettingTab = class extends import_obsidian4.PluginSettingTab {
         });
       });
     } else {
+      new import_obsidian4.Setting(card).setName("Google OAuth Credentials").setDesc(
+        "Enter your Google Cloud OAuth 2.0 Client ID and Secret (type: 'TVs and Limited Input devices')."
+      );
+      new import_obsidian4.Setting(card).setName("Google Client ID").setDesc("Client ID from your Google Cloud Console project").addText((text) => {
+        text.setPlaceholder("e.g. 123456789-abcdef.apps.googleusercontent.com").setValue(this.plugin.settings.googleDrive.clientId).onChange(async (val) => {
+          this.plugin.settings.googleDrive.clientId = val.trim();
+          await this.plugin.saveSettings();
+        });
+      });
+      new import_obsidian4.Setting(card).setName("Google Client Secret").setDesc("Required by Google OAuth 2.0 Device Flow").addText((text) => {
+        text.setPlaceholder("GOCSPX-...").setValue(this.plugin.settings.googleDrive.clientSecret).onChange(async (val) => {
+          this.plugin.settings.googleDrive.clientSecret = val.trim();
+          await this.plugin.saveSettings();
+        });
+      });
       new import_obsidian4.Setting(card).setName("Connect to Google Drive").setDesc(
         "Authorize this plugin to access your vault files using Google's secure device login"
       ).addButton((btn) => {
         btn.setButtonText("Connect Account").setCta().onClick(async () => {
+          const { clientId, clientSecret, scope } = this.plugin.settings.googleDrive;
+          if (!clientId || !clientSecret) {
+            new import_obsidian4.Notice(
+              "Please enter both your Google Client ID and Client Secret before connecting."
+            );
+            return;
+          }
           btn.setDisabled(true);
           try {
             const deviceResp = await GoogleOAuthDeviceFlow.requestDeviceCode(
-              this.plugin.settings.googleDrive.clientId,
-              this.plugin.settings.googleDrive.scope
+              clientId,
+              scope
             );
             new DeviceAuthModal(
               this.app,
               deviceResp,
-              this.plugin.settings.googleDrive.clientId,
-              this.plugin.settings.googleDrive.clientSecret,
+              clientId,
+              clientSecret,
               async (tokens) => {
                 this.plugin.settings.googleDrive.refreshToken = tokens.refreshToken;
                 this.plugin.settings.googleDrive.accessToken = tokens.accessToken;
@@ -1616,19 +1737,7 @@ var GDriveSyncSettingTab = class extends import_obsidian4.PluginSettingTab {
     }
     const advancedDetails = containerEl.createEl("details");
     advancedDetails.createEl("summary", {
-      text: "Advanced OAuth Credentials (Optional)"
-    });
-    new import_obsidian4.Setting(advancedDetails).setName("Google Client ID").setDesc("Custom Google Cloud OAuth Client ID (Device type)").addText((text) => {
-      text.setPlaceholder("Enter client_id").setValue(this.plugin.settings.googleDrive.clientId).onChange(async (val) => {
-        this.plugin.settings.googleDrive.clientId = val.trim();
-        await this.plugin.saveSettings();
-      });
-    });
-    new import_obsidian4.Setting(advancedDetails).setName("Google Client Secret").setDesc("Optional for TV/Device client IDs").addText((text) => {
-      text.setPlaceholder("Enter client_secret").setValue(this.plugin.settings.googleDrive.clientSecret).onChange(async (val) => {
-        this.plugin.settings.googleDrive.clientSecret = val.trim();
-        await this.plugin.saveSettings();
-      });
+      text: "Manual Token Entry (Alternative)"
     });
     new import_obsidian4.Setting(advancedDetails).setName("Manual Refresh Token").setDesc("Paste an existing Google OAuth refresh token directly").addText((text) => {
       text.setPlaceholder("1//...").setValue(this.plugin.settings.googleDrive.refreshToken).onChange(async (val) => {
@@ -1764,12 +1873,10 @@ var GDriveSyncSettingTab = class extends import_obsidian4.PluginSettingTab {
 };
 
 // src/types.ts
-var DEFAULT_GOOGLE_CLIENT_ID = "968132959885-v4koc9veb4g8r4h8qucf1689p7c1mfr9.apps.googleusercontent.com";
-var DEFAULT_GOOGLE_CLIENT_SECRET = "";
 var DEFAULT_SETTINGS = {
   googleDrive: {
-    clientId: DEFAULT_GOOGLE_CLIENT_ID,
-    clientSecret: DEFAULT_GOOGLE_CLIENT_SECRET,
+    clientId: "",
+    clientSecret: "",
     refreshToken: "",
     accessToken: "",
     accessTokenExpiresAtMs: 0,
@@ -2057,19 +2164,28 @@ var GDriveSyncPlugin = class extends import_obsidian5.Plugin {
     }
   }
   async loadSettings() {
-    const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    if (data && data.googleDrive) {
+    const data = await this.loadData() || {};
+    const { syncRecords, ...settingsData } = data;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, settingsData);
+    if (settingsData && settingsData.googleDrive) {
       this.settings.googleDrive = Object.assign(
         {},
         DEFAULT_SETTINGS.googleDrive,
-        data.googleDrive
+        settingsData.googleDrive
       );
     }
   }
   async saveSettings() {
     const currentData = await this.loadData() || {};
-    const toSave = Object.assign({}, currentData, this.settings);
+    const activeSyncRecords = currentData.syncRecords;
+    const settingsCopy = { ...this.settings };
+    delete settingsCopy.syncRecords;
+    const toSave = Object.assign({}, currentData, settingsCopy);
+    if (activeSyncRecords !== void 0) {
+      toSave.syncRecords = activeSyncRecords;
+    } else {
+      delete toSave.syncRecords;
+    }
     await this.saveData(toSave);
   }
 };

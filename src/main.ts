@@ -334,20 +334,30 @@ export class GDriveSyncPlugin extends Plugin {
   }
 
   async loadSettings() {
-    const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    if (data && data.googleDrive) {
+    const data = (await this.loadData()) || {};
+    const { syncRecords, ...settingsData } = data;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, settingsData);
+    if (settingsData && settingsData.googleDrive) {
       this.settings.googleDrive = Object.assign(
         {},
         DEFAULT_SETTINGS.googleDrive,
-        data.googleDrive
+        settingsData.googleDrive
       );
     }
   }
 
   async saveSettings() {
     const currentData = (await this.loadData()) || {};
-    const toSave = Object.assign({}, currentData, this.settings);
+    const activeSyncRecords = currentData.syncRecords;
+    const settingsCopy: any = { ...this.settings };
+    delete settingsCopy.syncRecords;
+
+    const toSave = Object.assign({}, currentData, settingsCopy);
+    if (activeSyncRecords !== undefined) {
+      toSave.syncRecords = activeSyncRecords;
+    } else {
+      delete toSave.syncRecords;
+    }
     await this.saveData(toSave);
   }
 }

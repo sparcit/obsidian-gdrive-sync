@@ -38,14 +38,10 @@ export interface PluginSettings {
   lastSyncError: string;
 }
 
-export const DEFAULT_GOOGLE_CLIENT_ID =
-  "968132959885-v4koc9veb4g8r4h8qucf1689p7c1mfr9.apps.googleusercontent.com";
-export const DEFAULT_GOOGLE_CLIENT_SECRET = "";
-
 export const DEFAULT_SETTINGS: PluginSettings = {
   googleDrive: {
-    clientId: DEFAULT_GOOGLE_CLIENT_ID,
-    clientSecret: DEFAULT_GOOGLE_CLIENT_SECRET,
+    clientId: "",
+    clientSecret: "",
     refreshToken: "",
     accessToken: "",
     accessTokenExpiresAtMs: 0,
@@ -89,10 +85,16 @@ export interface FsEntity {
 export interface SyncRecord {
   key: string;
   isFolder: boolean;
-  size: number;
-  mtime: number;
-  hash?: string;
+  localSize: number;
+  localMtime: number;
+  remoteHash?: string;
+  remoteMtime?: number;
+  remoteSize?: number;
   syncTime: number;
+  // Legacy backward-compatibility fields
+  size?: number;
+  mtime?: number;
+  hash?: string;
 }
 
 export type SyncActionType =

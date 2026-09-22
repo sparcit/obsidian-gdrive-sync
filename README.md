@@ -72,33 +72,38 @@ This plugin extracts and adapts the pertinent architectural designs and sync rec
 
 ## Getting Started & Authentication
 
-1. Open Obsidian **Settings $\rightarrow$ Google Drive Sync**.
-2. Under **Google Account**, click **Connect Account**.
-3. A modal appears displaying your one-time **Device Code** (e.g., `ABCD-EFGH`).
-4. Click **Open Google Login in Browser** (or navigate to `https://www.google.com/device` and enter the code).
-5. Sign in to your Google Account and grant permission to manage your vault files.
-6. Return to Obsidian: the modal will detect the authorization, display a success notification, and display your connected account email.
+To connect Obsidian with your Google Drive, you will set up your own free Google Cloud OAuth 2.0 credentials. This gives you dedicated API quota and complete privacy:
 
-### (Optional) Setting Up Your Own Google Cloud OAuth Credentials
+### Step 1: Set Up Google Cloud OAuth Credentials
 
-If you prefer to use your own Google Cloud project for full privacy and dedicated API quota:
-
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new project (e.g., `Obsidian Sync`).
-3. Enable the **Google Drive API**:
-   - Go to **APIs & Services $\rightarrow$ Library**.
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and create a project (e.g., `Obsidian Sync`).
+2. Enable the **Google Drive API**:
+   - Navigate to **APIs & Services $\rightarrow$ Library**.
    - Search for **Google Drive API** and click **Enable**.
-4. Configure the OAuth Consent Screen:
-   - User Type: **External**.
-   - App Name: `Obsidian Vault Sync`.
-   - Add scope: `https://www.googleapis.com/auth/drive.file` (access only to files created or opened by this app).
-   - Add your Google account email under **Test Users**.
-5. Create OAuth Credentials:
+3. Configure the **OAuth Consent Screen**:
+   - User Type: Select **External** and click **Create**.
+   - App Name: `Obsidian Vault Sync` (enter your email for user support and developer contact).
+   - Scopes: Click **Add or Remove Scopes** and add:
+     `https://www.googleapis.com/auth/drive.file`
+     *(This grants the plugin access strictly to files/folders it creates or opens).*
+   - **Important: Set Publishing Status to "In Production"**:
+     On the OAuth consent screen dashboard, click **"Publish App"** to set the Publishing status to **In production**.
+     > **Why this matters**: In "Testing" mode, Google automatically revokes refresh tokens after **7 days**, forcing you to sign in every week. Setting your app to "In production" keeps refresh tokens permanently valid. (Google verification is **not** required for personal use; you simply click "Advanced $\rightarrow$ Go to Obsidian Vault Sync (unsafe)" once when signing in on your browser).
+4. Create Credentials:
    - Go to **APIs & Services $\rightarrow$ Credentials $\rightarrow$ Create Credentials $\rightarrow$ OAuth client ID**.
-   - Application type: **TV and Limited Input devices** (or **Desktop app**).
-   - Name: `Obsidian Client`.
-6. Copy the **Client ID** (and Secret if provided).
-7. In Obsidian under **Settings $\rightarrow$ Google Drive Sync $\rightarrow$ Advanced OAuth Credentials**, paste your **Client ID**.
+   - Application type: Select **"TVs and Limited Input devices"** (mandatory for Google Device Code flow).
+   - Name: `Obsidian Device Client`.
+   - Click **Create**. Copy both the **Client ID** and **Client Secret**.
+
+### Step 2: Connect in Obsidian
+
+1. In Obsidian, open **Settings $\rightarrow$ Google Drive Sync**.
+2. Under **Google Account**, enter your **Google Client ID** and **Google Client Secret**.
+3. Click **Connect Account**.
+4. A modal appears displaying your one-time **Device Code** (e.g., `ABCD-EFGH`).
+5. Click **Open Google Login in Browser** (or visit `https://www.google.com/device` and enter the code).
+6. Sign in with your Google account and grant permission.
+7. Return to Obsidian: the modal will confirm authorization and display your connected email.
 
 ---
 
@@ -127,12 +132,14 @@ The synchronization algorithm compares the current local state ($L$), the curren
 | :---: | :---: | :---: | :--- | :--- |
 | **New** | *None* | *None* | File created locally | **Upload** to Google Drive |
 | *None* | **New** | *None* | File created on Drive | **Download** to local vault |
-| **Exists** | **Exists** | *None* or Old | Identical ($size$ and $mtime$ match) | **No-op** (Mark equal) |
+| **Exists** | **Exists** | Matches $L$ & $R$ | Unchanged on both sides | **No-op** (Equal, no network bounce) |
 | **Modified** | Unchanged | Same as $R$ | Local edited | **Upload** to Google Drive |
 | Unchanged | **Modified** | Same as $L$ | Remote edited | **Download** to local vault |
 | **Modified** | **Modified** | Old | Both edited (Conflict) | Resolved via chosen **Conflict Rule** |
-| **Exists** | *None* | Exists | Remote deleted | **Delete** locally |
-| *None* | **Exists** | Exists | Local deleted | **Delete** on Google Drive |
+| Untouched | *None* | Exists | Remote deleted | **Delete** locally |
+| **Modified** | *None* | Exists | Remote deleted, but local edited | **Upload** (Edit wins over delete!) |
+| *None* | Untouched | Exists | Local deleted | **Delete** on Google Drive |
+| *None* | **Modified** | Exists | Local deleted, but remote edited | **Download** (Edit wins over delete!) |
 
 ---
 

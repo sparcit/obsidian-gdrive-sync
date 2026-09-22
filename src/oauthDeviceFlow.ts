@@ -9,6 +9,10 @@ export class GoogleOAuthDeviceFlow {
     clientId: string,
     scope: string
   ): Promise<DeviceCodeResponse> {
+    if (!clientId) {
+      throw new Error("Missing Google Client ID. Please configure it in plugin settings.");
+    }
+
     const params = new URLSearchParams({
       client_id: clientId,
       scope: scope,
@@ -44,6 +48,10 @@ export class GoogleOAuthDeviceFlow {
     isCancelled: () => boolean,
     onStatusUpdate?: (statusText: string) => void
   ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+    if (!clientSecret) {
+      throw new Error("Missing Google Client Secret. Google requires client_secret for device code authentication.");
+    }
+
     const deadline = Date.now() + expiresInSeconds * 1000;
     let pollInterval = Math.max(intervalSeconds, 5);
 

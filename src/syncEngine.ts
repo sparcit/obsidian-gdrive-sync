@@ -194,10 +194,38 @@ export class SyncEngine {
   ): SyncDecision {
     // Case 1: Exists on both sides
     if (local && remote) {
+      // Side-specific change detection against previous sync snapshot
+      const localUnchanged =
+        prev &&
+        local.size === prev.localSize &&
+        Math.abs(local.mtime - prev.localMtime) <= 1500;
+
+      const remoteUnchanged =
+        prev &&
+        (prev.remoteHash && remote.hash
+          ? remote.hash === prev.remoteHash
+          : remote.size === prev.remoteSize &&
+            Math.abs(remote.mtime - (prev.remoteMtime ?? 0)) <= 1500);
+
+      // If both sides are known to be unchanged from prev sync, it is equal (no bounce)
+      if (prev && localUnchanged && remoteUnchanged) {
+        return {
+          key,
+          isFolder: false,
+          action: "equal",
+          localEntity: local,
+          remoteEntity: remote,
+          prevRecord: prev,
+          reason: "Neither local nor remote file has changed since last sync",
+          isChange: false,
+        };
+      }
+
+      // Check if files are directly identical (same content/hash or size & mtime match)
       const isIdentical =
         local.size === remote.size &&
-        (Math.abs(local.mtime - remote.mtime) <= 1500 ||
-          (local.hash && remote.hash && local.hash === remote.hash));
+        ((local.hash && remote.hash && local.hash === remote.hash) ||
+          Math.abs(local.mtime - remote.mtime) <= 1500);
 
       if (isIdentical) {
         return {
@@ -206,22 +234,11 @@ export class SyncEngine {
           action: "equal",
           localEntity: local,
           remoteEntity: remote,
+          prevRecord: prev,
           reason: "File is identical on both sides",
           isChange: false,
         };
       }
-
-      // Check against previous sync snapshot
-      const localUnchanged =
-        prev &&
-        local.size === prev.size &&
-        Math.abs(local.mtime - prev.mtime) <= 1500;
-
-      const remoteUnchanged =
-        prev &&
-        remote.size === prev.size &&
-        (Math.abs(remote.mtime - prev.mtime) <= 1500 ||
-          (prev.hash && remote.hash && prev.hash === remote.hash));
 
       if (localUnchanged && !remoteUnchanged) {
         // Remote modified
@@ -342,7 +359,28 @@ export class SyncEngine {
     // Case 2: Exists locally only
     if (local && !remote) {
       if (prev) {
-        // Deleted remotely
+        // Check if local was modified since prev sync
+        const localModifiedSincePrev =
+          local.size !== prev.localSize ||
+          Math.abs(local.mtime - prev.localMtime) > 1500;
+
+        if (localModifiedSincePrev) {
+          // Local modification wins over remote deletion
+          if (direction === "pull_only") {
+            return { key, isFolder: false, action: "skip", reason: "Local modified but remote deleted; pull only skips", isChange: false };
+          }
+          return {
+            key,
+            isFolder: false,
+            action: "upload",
+            localEntity: local,
+            prevRecord: prev,
+            reason: "Local file was modified after remote deletion (edit wins over delete)",
+            isChange: true,
+          };
+        }
+
+        // Deleted remotely and local was untouched
         if (direction === "push_only") {
           return { key, isFolder: false, action: "skip", reason: "Deleted remotely; push only skips", isChange: false };
         }
@@ -374,7 +412,29 @@ export class SyncEngine {
     // Case 3: Exists remotely only
     if (!local && remote) {
       if (prev) {
-        // Deleted locally
+        // Check if remote was modified since prev sync
+        const remoteModifiedSincePrev = prev.remoteHash && remote.hash
+          ? remote.hash !== prev.remoteHash
+          : remote.size !== prev.remoteSize ||
+            Math.abs(remote.mtime - (prev.remoteMtime ?? 0)) > 1500;
+
+        if (remoteModifiedSincePrev) {
+          // Remote modification wins over local deletion
+          if (direction === "push_only") {
+            return { key, isFolder: false, action: "skip", reason: "Remote modified but local deleted; push only skips", isChange: false };
+          }
+          return {
+            key,
+            isFolder: false,
+            action: "download",
+            remoteEntity: remote,
+            prevRecord: prev,
+            reason: "Remote file was modified after local deletion (edit wins over delete)",
+            isChange: true,
+          };
+        }
+
+        // Deleted locally and remote was untouched
         if (direction === "pull_only") {
           return { key, isFolder: false, action: "skip", reason: "Deleted locally; pull only skips", isChange: false };
         }
@@ -426,6 +486,26 @@ export class SyncEngine {
     const errors: { key: string; error: string }[] = [];
     let syncedCount = 0;
 
+    // Phase 0: Record baseline snapshots for matching ("equal") files and folders
+    const now = Date.now();
+    for (const d of decisions) {
+      if (d.action === "equal") {
+        const existing = this.db.getRecord(d.key);
+        if (!existing) {
+          this.db.upsertRecord({
+            key: d.key,
+            isFolder: d.isFolder,
+            localSize: d.localEntity?.size ?? 0,
+            localMtime: d.localEntity?.mtime ?? now,
+            remoteHash: d.remoteEntity?.hash,
+            remoteMtime: d.remoteEntity?.mtime,
+            remoteSize: d.remoteEntity?.size,
+            syncTime: now,
+          });
+        }
+      }
+    }
+
     // Filter decisions requiring changes
     const activeChanges = decisions.filter((d) => d.isChange);
     const totalCount = activeChanges.length;
@@ -449,8 +529,10 @@ export class SyncEngine {
         this.db.upsertRecord({
           key: d.key,
           isFolder: true,
-          size: 0,
-          mtime: Date.now(),
+          localSize: 0,
+          localMtime: Date.now(),
+          remoteMtime: Date.now(),
+          remoteSize: 0,
           syncTime: Date.now(),
         });
         syncedCount++;
@@ -564,12 +646,15 @@ export class SyncEngine {
           content,
           d.localEntity?.mtime
         );
+        const localStat = await this.localFs.stat(d.key);
         this.db.upsertRecord({
           key: d.key,
           isFolder: false,
-          size: content.byteLength,
-          mtime: uploaded.mtime,
-          hash: uploaded.hash,
+          localSize: content.byteLength,
+          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
+          remoteHash: uploaded.hash,
+          remoteMtime: uploaded.mtime,
+          remoteSize: uploaded.size,
           syncTime: now,
         });
         break;
@@ -579,12 +664,15 @@ export class SyncEngine {
       case "conflict_keep_remote": {
         const content = await this.driveApi.readFile(d.key);
         await this.localFs.writeFile(d.key, content);
+        const localStat = await this.localFs.stat(d.key);
         this.db.upsertRecord({
           key: d.key,
           isFolder: false,
-          size: content.byteLength,
-          mtime: d.remoteEntity?.mtime || now,
-          hash: d.remoteEntity?.hash,
+          localSize: content.byteLength,
+          localMtime: localStat?.mtime ?? now,
+          remoteHash: d.remoteEntity?.hash,
+          remoteMtime: d.remoteEntity?.mtime,
+          remoteSize: d.remoteEntity?.size ?? content.byteLength,
           syncTime: now,
         });
         break;
@@ -602,23 +690,29 @@ export class SyncEngine {
             content,
             d.localEntity.mtime
           );
+          const localStat = await this.localFs.stat(d.key);
           this.db.upsertRecord({
             key: d.key,
             isFolder: false,
-            size: content.byteLength,
-            mtime: uploaded.mtime,
-            hash: uploaded.hash,
+            localSize: content.byteLength,
+            localMtime: localStat?.mtime ?? d.localEntity.mtime,
+            remoteHash: uploaded.hash,
+            remoteMtime: uploaded.mtime,
+            remoteSize: uploaded.size,
             syncTime: now,
           });
         } else {
           const content = await this.driveApi.readFile(d.key);
           await this.localFs.writeFile(d.key, content);
+          const localStat = await this.localFs.stat(d.key);
           this.db.upsertRecord({
             key: d.key,
             isFolder: false,
-            size: content.byteLength,
-            mtime: d.remoteEntity?.mtime || now,
-            hash: d.remoteEntity?.hash,
+            localSize: content.byteLength,
+            localMtime: localStat?.mtime ?? now,
+            remoteHash: d.remoteEntity?.hash,
+            remoteMtime: d.remoteEntity?.mtime,
+            remoteSize: d.remoteEntity?.size ?? content.byteLength,
             syncTime: now,
           });
         }
@@ -630,6 +724,7 @@ export class SyncEngine {
         const remoteContent = await this.driveApi.readFile(d.key);
         const conflictKey = this.generateConflictPath(d.key);
         await this.localFs.writeFile(conflictKey, remoteContent);
+        const conflictStat = await this.localFs.stat(conflictKey);
 
         // 2. Upload local version as the canonical version
         const localContent = await this.localFs.readFile(d.key);
@@ -638,13 +733,16 @@ export class SyncEngine {
           localContent,
           d.localEntity?.mtime
         );
+        const localStat = await this.localFs.stat(d.key);
 
         this.db.upsertRecord({
           key: d.key,
           isFolder: false,
-          size: localContent.byteLength,
-          mtime: uploaded.mtime,
-          hash: uploaded.hash,
+          localSize: localContent.byteLength,
+          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
+          remoteHash: uploaded.hash,
+          remoteMtime: uploaded.mtime,
+          remoteSize: uploaded.size,
           syncTime: now,
         });
 
@@ -657,23 +755,26 @@ export class SyncEngine {
         this.db.upsertRecord({
           key: conflictKey,
           isFolder: false,
-          size: remoteContent.byteLength,
-          mtime: uploadedConflict.mtime,
-          hash: uploadedConflict.hash,
+          localSize: remoteContent.byteLength,
+          localMtime: conflictStat?.mtime ?? now,
+          remoteHash: uploadedConflict.hash,
+          remoteMtime: uploadedConflict.mtime,
+          remoteSize: uploadedConflict.size,
           syncTime: now,
         });
         break;
       }
 
       case "equal": {
-        // Update hash/mtime if needed
         if (d.localEntity) {
           this.db.upsertRecord({
             key: d.key,
             isFolder: false,
-            size: d.localEntity.size,
-            mtime: d.localEntity.mtime,
-            hash: d.remoteEntity?.hash,
+            localSize: d.localEntity.size,
+            localMtime: d.localEntity.mtime,
+            remoteHash: d.remoteEntity?.hash,
+            remoteMtime: d.remoteEntity?.mtime,
+            remoteSize: d.remoteEntity?.size,
             syncTime: now,
           });
         }
