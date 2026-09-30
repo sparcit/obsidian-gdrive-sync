@@ -11,6 +11,7 @@ import type {
 import type { FsLocal } from "./localFs";
 import type { GoogleDriveApi } from "./googleDriveApi";
 import type { LocalDb } from "./localDb";
+import { md5 } from "./md5";
 
 export class SyncEngine {
   private localFs: FsLocal;
@@ -33,10 +34,10 @@ export class SyncEngine {
   /**
    * Plans the synchronization actions by comparing local, remote, and previous sync state
    */
-  public planSync(
+  public async planSync(
     localEntities: FsEntity[],
     remoteEntities: FsEntity[]
-  ): SyncDecision[] {
+  ): Promise<SyncDecision[]> {
     const localMap = new Map<string, FsEntity>();
     for (const e of localEntities) localMap.set(e.key, e);
 
@@ -64,6 +65,25 @@ export class SyncEngine {
       const prev = prevMap.get(key);
       const isFolder = key.endsWith("/");
 
+      // Checksum comparison on first sync (Problem B fix):
+      // When there's no prior sync history and file sizes match, compute local MD5 to compare with remote
+      if (
+        !isFolder &&
+        !prev &&
+        local &&
+        remote &&
+        local.size === remote.size &&
+        remote.hash &&
+        !local.hash
+      ) {
+        try {
+          const content = await this.localFs.readFile(key);
+          local.hash = md5(content);
+        } catch (err) {
+          console.warn(`Could not compute MD5 for local file "${key}":`, err);
+        }
+      }
+
       const decision = this.decideItem(
         key,
         isFolder,
@@ -75,6 +95,47 @@ export class SyncEngine {
       );
 
       decisions.push(decision);
+    }
+
+    // Post-process folder deletions (Folder delete bug fix):
+    // Cancel folder deletion if any child item is active / retained (edit beats folder delete)
+    for (const d of decisions) {
+      if (
+        d.isFolder &&
+        (d.action === "delete_local_folder" ||
+          d.action === "delete_remote_folder")
+      ) {
+        const folderKey = d.key; // e.g. "Folder/"
+        const hasActiveChildren = decisions.some((child) => {
+          if (child.key === folderKey || !child.key.startsWith(folderKey)) {
+            return false;
+          }
+          // A child is active if it's NOT scheduled for deletion and NOT skipped
+          const isChildDeletion =
+            child.action === "delete_local" ||
+            child.action === "delete_remote" ||
+            child.action === "delete_local_folder" ||
+            child.action === "delete_remote_folder" ||
+            child.action === "skip";
+          return !isChildDeletion;
+        });
+
+        if (hasActiveChildren) {
+          if (d.action === "delete_local_folder") {
+            // Local folder has active children; keep it and ensure it exists remotely
+            d.action = d.remoteEntity ? "equal" : "create_remote_folder";
+            d.isChange = !d.remoteEntity;
+            d.reason =
+              "Folder deletion cancelled: folder contains active or modified notes";
+          } else if (d.action === "delete_remote_folder") {
+            // Remote folder has active children; keep it and ensure it exists locally
+            d.action = d.localEntity ? "equal" : "create_local_folder";
+            d.isChange = !d.localEntity;
+            d.reason =
+              "Folder deletion cancelled: folder contains active or modified notes";
+          }
+        }
+      }
     }
 
     return decisions;
@@ -505,6 +566,8 @@ export class SyncEngine {
         }
       }
     }
+    // Incremental save after baseline phase
+    await this.db.save();
 
     // Filter decisions requiring changes
     const activeChanges = decisions.filter((d) => d.isChange);
@@ -541,6 +604,9 @@ export class SyncEngine {
         errors.push({ key: d.key, error: err.message || String(err) });
       }
     }
+    if (folderCreations.length > 0) {
+      await this.db.save();
+    }
 
     // Phase B: File Transfers (Uploads, Downloads, Conflict resolution)
     const fileOperations = activeChanges.filter(
@@ -553,6 +619,7 @@ export class SyncEngine {
     // Concurrency pool (3 concurrent operations)
     const CONCURRENCY = 3;
     let fileOpIndex = 0;
+    let completedOpsSinceSave = 0;
 
     const worker = async () => {
       while (fileOpIndex < fileOperations.length) {
@@ -560,6 +627,11 @@ export class SyncEngine {
         try {
           await this.executeFileOperation(d);
           syncedCount++;
+          completedOpsSinceSave++;
+          if (completedOpsSinceSave >= 5) {
+            completedOpsSinceSave = 0;
+            await this.db.save();
+          }
           onProgress?.(
             syncedCount,
             totalCount,
@@ -574,6 +646,8 @@ export class SyncEngine {
 
     const workers = Array.from({ length: CONCURRENCY }, () => worker());
     await Promise.all(workers);
+    // Incremental save after all file transfers
+    await this.db.save();
 
     // Phase C: File Deletions
     const fileDeletions = activeChanges.filter(
@@ -596,6 +670,9 @@ export class SyncEngine {
         errors.push({ key: d.key, error: err.message || String(err) });
       }
     }
+    if (fileDeletions.length > 0) {
+      await this.db.save();
+    }
 
     // Phase D: Folder Deletions (Deepest first)
     const folderDeletions = activeChanges.filter(
@@ -608,14 +685,21 @@ export class SyncEngine {
 
     for (const d of folderDeletions) {
       try {
+        let deleted = false;
         if (d.action === "delete_local_folder") {
-          await this.localFs.deleteFolder(d.key);
+          deleted = await this.localFs.deleteFolder(d.key);
         } else if (d.action === "delete_remote_folder") {
-          await this.driveApi.rm(d.key);
+          deleted = await this.driveApi.rm(d.key);
         }
-        this.db.deleteRecord(d.key);
-        syncedCount++;
-        onProgress?.(syncedCount, totalCount, `Deleted folder: ${d.key}`, d.key);
+        if (deleted) {
+          this.db.deleteRecord(d.key);
+          syncedCount++;
+          onProgress?.(syncedCount, totalCount, `Deleted folder: ${d.key}`, d.key);
+        } else {
+          console.warn(
+            `Folder "${d.key}" was not deleted because it is not empty.`
+          );
+        }
       } catch (err: any) {
         errors.push({ key: d.key, error: err.message || String(err) });
       }
@@ -628,10 +712,135 @@ export class SyncEngine {
       }
     }
 
-    // Persist snapshot records
+    // Final persist
     await this.db.save();
 
     return { syncedCount, errors };
+  }
+
+  /**
+   * Uploads a file with mid-upload modification guard (Typing-during-upload bug fix)
+   */
+  private async uploadFileWithGuard(
+    key: string,
+    forcedMtime?: number
+  ): Promise<boolean> {
+    const now = Date.now();
+    const statBefore = await this.localFs.stat(key);
+    if (!statBefore) {
+      return false;
+    }
+
+    const content = await this.localFs.readFile(key);
+    const mtimeToUse = forcedMtime ?? statBefore.mtime;
+    const uploaded = await this.driveApi.writeFile(key, content, mtimeToUse);
+    const statAfter = await this.localFs.stat(key);
+
+    // If file changed while reading/uploading, do not record statAfter
+    const changedMidUpload =
+      !statAfter ||
+      statAfter.mtime !== statBefore.mtime ||
+      statAfter.size !== statBefore.size;
+
+    if (changedMidUpload) {
+      console.warn(
+        `File "${key}" was modified during upload. Recording pre-upload snapshot so next sync uploads the mid-upload edit.`
+      );
+      this.db.upsertRecord({
+        key,
+        isFolder: false,
+        localSize: statBefore.size,
+        localMtime: statBefore.mtime,
+        remoteHash: uploaded.hash,
+        remoteMtime: uploaded.mtime,
+        remoteSize: uploaded.size,
+        syncTime: now,
+      });
+      return false;
+    }
+
+    this.db.upsertRecord({
+      key,
+      isFolder: false,
+      localSize: statBefore.size,
+      localMtime: statBefore.mtime,
+      remoteHash: uploaded.hash,
+      remoteMtime: uploaded.mtime,
+      remoteSize: uploaded.size,
+      syncTime: now,
+    });
+    return true;
+  }
+
+  /**
+   * Downloads a file with mid-sync local modification guard
+   */
+  private async downloadFileWithGuard(d: SyncDecision): Promise<void> {
+    const now = Date.now();
+    const statCurrent = await this.localFs.stat(d.key);
+
+    // Guard: Has the local file changed or been created since the scan?
+    const localModifiedMidSync =
+      statCurrent &&
+      d.localEntity &&
+      (statCurrent.mtime !== d.localEntity.mtime ||
+        statCurrent.size !== d.localEntity.size);
+    const localCreatedMidSync = statCurrent && !d.localEntity;
+
+    if (localModifiedMidSync || localCreatedMidSync) {
+      // Local file was edited or created while download was in flight!
+      // Treat as conflict instead of overwriting user's typing
+      console.warn(
+        `Local file "${d.key}" changed during sync download. Creating conflict copy.`
+      );
+      const remoteContent = await this.driveApi.readFile(d.key);
+      const conflictKey = this.generateConflictPath(d.key);
+      await this.localFs.writeFile(conflictKey, remoteContent);
+      const conflictStat = await this.localFs.stat(conflictKey);
+
+      this.db.upsertRecord({
+        key: conflictKey,
+        isFolder: false,
+        localSize: remoteContent.byteLength,
+        localMtime: conflictStat?.mtime ?? now,
+        remoteHash: d.remoteEntity?.hash,
+        remoteMtime: d.remoteEntity?.mtime,
+        remoteSize: d.remoteEntity?.size ?? remoteContent.byteLength,
+        syncTime: now,
+      });
+
+      // Upload conflict copy to Drive so other devices receive both versions
+      const uploadedConflict = await this.driveApi.writeFile(
+        conflictKey,
+        remoteContent,
+        d.remoteEntity?.mtime
+      );
+      this.db.upsertRecord({
+        key: conflictKey,
+        isFolder: false,
+        localSize: remoteContent.byteLength,
+        localMtime: conflictStat?.mtime ?? now,
+        remoteHash: uploadedConflict.hash,
+        remoteMtime: uploadedConflict.mtime,
+        remoteSize: uploadedConflict.size,
+        syncTime: now,
+      });
+      return;
+    }
+
+    const content = await this.driveApi.readFile(d.key);
+    await this.localFs.writeFile(d.key, content);
+    const localStat = await this.localFs.stat(d.key);
+    this.db.upsertRecord({
+      key: d.key,
+      isFolder: false,
+      localSize: content.byteLength,
+      localMtime: localStat?.mtime ?? now,
+      remoteHash: d.remoteEntity?.hash,
+      remoteMtime: d.remoteEntity?.mtime,
+      remoteSize: d.remoteEntity?.size ?? content.byteLength,
+      syncTime: now,
+    });
   }
 
   private async executeFileOperation(d: SyncDecision): Promise<void> {
@@ -640,41 +849,13 @@ export class SyncEngine {
     switch (d.action) {
       case "upload":
       case "conflict_keep_local": {
-        const content = await this.localFs.readFile(d.key);
-        const uploaded = await this.driveApi.writeFile(
-          d.key,
-          content,
-          d.localEntity?.mtime
-        );
-        const localStat = await this.localFs.stat(d.key);
-        this.db.upsertRecord({
-          key: d.key,
-          isFolder: false,
-          localSize: content.byteLength,
-          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
-          remoteHash: uploaded.hash,
-          remoteMtime: uploaded.mtime,
-          remoteSize: uploaded.size,
-          syncTime: now,
-        });
+        await this.uploadFileWithGuard(d.key, d.localEntity?.mtime);
         break;
       }
 
       case "download":
       case "conflict_keep_remote": {
-        const content = await this.driveApi.readFile(d.key);
-        await this.localFs.writeFile(d.key, content);
-        const localStat = await this.localFs.stat(d.key);
-        this.db.upsertRecord({
-          key: d.key,
-          isFolder: false,
-          localSize: content.byteLength,
-          localMtime: localStat?.mtime ?? now,
-          remoteHash: d.remoteEntity?.hash,
-          remoteMtime: d.remoteEntity?.mtime,
-          remoteSize: d.remoteEntity?.size ?? content.byteLength,
-          syncTime: now,
-        });
+        await this.downloadFileWithGuard(d);
         break;
       }
 
@@ -684,37 +865,9 @@ export class SyncEngine {
           d.remoteEntity &&
           d.localEntity.mtime >= d.remoteEntity.mtime
         ) {
-          const content = await this.localFs.readFile(d.key);
-          const uploaded = await this.driveApi.writeFile(
-            d.key,
-            content,
-            d.localEntity.mtime
-          );
-          const localStat = await this.localFs.stat(d.key);
-          this.db.upsertRecord({
-            key: d.key,
-            isFolder: false,
-            localSize: content.byteLength,
-            localMtime: localStat?.mtime ?? d.localEntity.mtime,
-            remoteHash: uploaded.hash,
-            remoteMtime: uploaded.mtime,
-            remoteSize: uploaded.size,
-            syncTime: now,
-          });
+          await this.uploadFileWithGuard(d.key, d.localEntity.mtime);
         } else {
-          const content = await this.driveApi.readFile(d.key);
-          await this.localFs.writeFile(d.key, content);
-          const localStat = await this.localFs.stat(d.key);
-          this.db.upsertRecord({
-            key: d.key,
-            isFolder: false,
-            localSize: content.byteLength,
-            localMtime: localStat?.mtime ?? now,
-            remoteHash: d.remoteEntity?.hash,
-            remoteMtime: d.remoteEntity?.mtime,
-            remoteSize: d.remoteEntity?.size ?? content.byteLength,
-            syncTime: now,
-          });
+          await this.downloadFileWithGuard(d);
         }
         break;
       }
@@ -726,25 +879,8 @@ export class SyncEngine {
         await this.localFs.writeFile(conflictKey, remoteContent);
         const conflictStat = await this.localFs.stat(conflictKey);
 
-        // 2. Upload local version as the canonical version
-        const localContent = await this.localFs.readFile(d.key);
-        const uploaded = await this.driveApi.writeFile(
-          d.key,
-          localContent,
-          d.localEntity?.mtime
-        );
-        const localStat = await this.localFs.stat(d.key);
-
-        this.db.upsertRecord({
-          key: d.key,
-          isFolder: false,
-          localSize: localContent.byteLength,
-          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
-          remoteHash: uploaded.hash,
-          remoteMtime: uploaded.mtime,
-          remoteSize: uploaded.size,
-          syncTime: now,
-        });
+        // 2. Upload local version as canonical with upload race guard
+        await this.uploadFileWithGuard(d.key, d.localEntity?.mtime);
 
         // 3. Upload the conflict copy to remote so other devices see both
         const uploadedConflict = await this.driveApi.writeFile(

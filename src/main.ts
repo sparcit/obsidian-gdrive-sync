@@ -223,6 +223,7 @@ export class GDriveSyncPlugin extends Plugin {
     );
 
     try {
+      this.driveApi.clearCache();
       this.updateStatusBar("Scanning local...");
       const localEntities = await this.localFs.walk();
 
@@ -230,7 +231,7 @@ export class GDriveSyncPlugin extends Plugin {
       const remoteEntities = await this.driveApi.walk();
 
       this.updateStatusBar("Planning sync...");
-      const decisions = engine.planSync(localEntities, remoteEntities);
+      const decisions = await engine.planSync(localEntities, remoteEntities);
 
       const changeCount = decisions.filter((d) => d.isChange).length;
       if (changeCount === 0) {
@@ -277,13 +278,14 @@ export class GDriveSyncPlugin extends Plugin {
       }
     } catch (err: any) {
       console.error("Google Drive sync failed:", err);
+      const formatted = GoogleDriveApi.formatGoogleError(err.message || String(err));
       this.settings.lastSyncStatus = "error";
-      this.settings.lastSyncError = err.message || String(err);
+      this.settings.lastSyncError = formatted;
       await this.saveSettings();
 
       this.updateRibbonState("error");
       this.updateStatusBar("Sync Error");
-      new Notice(`Google Drive Sync Error: ${err.message}`);
+      new Notice(`Google Drive Sync Error: ${formatted}`);
     } finally {
       this.isSyncing = false;
       window.setTimeout(() => {

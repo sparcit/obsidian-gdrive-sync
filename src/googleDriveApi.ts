@@ -29,8 +29,59 @@ export class GoogleDriveApi {
     this.config = newConfig;
     if (newBaseDir !== undefined) {
       this.remoteBaseDir = newBaseDir.trim() || this.vaultName;
-      this.rootFolderId = null;
+      this.clearCache();
     }
+  }
+
+  /**
+   * Clears in-memory path and folder ID caches so stale IDs are never reused
+   */
+  public clearCache(): void {
+    this.rootFolderId = null;
+    this.pathToEntity.clear();
+    this.folderPathToId.clear();
+  }
+
+  public static formatGoogleError(rawText: string, status?: number): string {
+    try {
+      const json = JSON.parse(rawText);
+      const err = json.error;
+      const code = typeof err === "string" ? err : err?.message || err?.status || "";
+      const desc = json.error_description || (typeof err === "object" ? err?.message : "") || "";
+      const full = `${code} ${desc}`;
+      if (full.includes("invalid_grant")) {
+        return "Google authorization expired or was revoked. Please reconnect your account in Settings.";
+      }
+      if (full.includes("invalid_client")) {
+        return "Invalid Google Client ID or Client Secret. Please verify your credentials in Settings.";
+      }
+      if (full.includes("access_denied")) {
+        return "Access denied on Google consent screen.";
+      }
+      if (
+        full.includes("insufficientPermissions") ||
+        full.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+      ) {
+        return "Insufficient Google Drive permissions. Ensure the scope 'https://www.googleapis.com/auth/drive.file' is added in your Google Cloud Console.";
+      }
+      if (
+        full.includes("rateLimitExceeded") ||
+        full.includes("userRateLimitExceeded")
+      ) {
+        return "Google Drive API rate limit reached. Please wait a moment before syncing again.";
+      }
+      if (desc) return desc;
+      if (err?.message) return err.message;
+    } catch {
+      // not JSON
+    }
+    if (rawText.includes("invalid_grant")) {
+      return "Google authorization expired or was revoked. Please reconnect your account in Settings.";
+    }
+    if (rawText.includes("invalid_client")) {
+      return "Invalid Google Client ID or Client Secret. Please verify your credentials in Settings.";
+    }
+    return rawText || `HTTP ${status || "unknown error"}`;
   }
 
   /**
@@ -71,7 +122,7 @@ export class GoogleDriveApi {
 
     if (resp.status !== 200) {
       throw new Error(
-        `Failed to refresh Google Drive access token: ${resp.text}`
+        `Failed to refresh Google Drive access token: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
       );
     }
 
@@ -116,10 +167,19 @@ export class GoogleDriveApi {
       return this.rootFolderId;
     }
 
-    const segments = this.remoteBaseDir
+    let segments = this.remoteBaseDir
       .split("/")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
+
+    // Strip leading "My Drive" or "MyDrive" if user entered full Drive path
+    if (
+      segments.length > 0 &&
+      (segments[0].toLowerCase() === "my drive" ||
+        segments[0].toLowerCase() === "mydrive")
+    ) {
+      segments = segments.slice(1);
+    }
 
     let parentId = "root";
     let cumulativePath = "";
@@ -160,7 +220,13 @@ export class GoogleDriveApi {
     });
 
     if (searchResp.status === 200 && searchResp.json.files?.length > 0) {
-      return searchResp.json.files[0].id;
+      // Deduplicate: If multiple folders exist with the same name, take the newest
+      const sorted = searchResp.json.files.sort((a: any, b: any) => {
+        const tA = a.modifiedTime ? Date.parse(a.modifiedTime) : 0;
+        const tB = b.modifiedTime ? Date.parse(b.modifiedTime) : 0;
+        return tB - tA;
+      });
+      return sorted[0].id;
     }
 
     // Create folder
@@ -189,8 +255,8 @@ export class GoogleDriveApi {
    * Recursively walks all files and folders inside the remote vault
    */
   public async walk(): Promise<FsEntity[]> {
+    this.clearCache();
     const rootId = await this.initRootFolder();
-    this.pathToEntity.clear();
 
     const allEntities: FsEntity[] = [];
     const queue: { folderId: string; folderPath: string }[] = [
@@ -221,7 +287,7 @@ export class GoogleDriveApi {
 
         if (resp.status !== 200) {
           throw new Error(
-            `Failed to list files in folder "${folderPath}": ${resp.text}`
+            `Failed to list files in folder "${folderPath}": ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
           );
         }
 
@@ -243,6 +309,17 @@ export class GoogleDriveApi {
             id: file.id,
             parentID: folderId,
           };
+
+          // Handle duplicate file/folder names in the same parent on Google Drive
+          const existing = this.pathToEntity.get(normalizedKey);
+          if (existing) {
+            // Keep the newer duplicate and skip the older one
+            if (entity.mtime <= existing.mtime) {
+              continue;
+            }
+            const idx = allEntities.findIndex((e) => e.key === normalizedKey);
+            if (idx >= 0) allEntities.splice(idx, 1);
+          }
 
           this.pathToEntity.set(normalizedKey, entity);
           allEntities.push(entity);
@@ -410,12 +487,52 @@ export class GoogleDriveApi {
   }
 
   /**
-   * Deletes (or trashes) a file or folder on Google Drive
+   * Checks if a remote Google Drive folder is completely empty (no non-trashed children)
    */
-  public async rm(key: string, permanent = false): Promise<void> {
+  public async isFolderEmpty(key: string): Promise<boolean> {
     const entity = this.pathToEntity.get(key) || (await this.lookupEntity(key));
     if (!entity || !entity.id) {
-      return;
+      return true;
+    }
+
+    const token = await this.getAccessToken();
+    const query = `'${entity.id}' in parents and trashed = false`;
+    const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+      query
+    )}&pageSize=1&fields=files(id)`;
+
+    const resp = await requestUrl({
+      url,
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (resp.status === 200 && resp.json.files) {
+      return resp.json.files.length === 0;
+    }
+    return true;
+  }
+
+  /**
+   * Deletes (or trashes) a file or folder on Google Drive ONLY if folder is empty
+   */
+  public async rm(key: string, permanent = false): Promise<boolean> {
+    const entity = this.pathToEntity.get(key) || (await this.lookupEntity(key));
+    if (!entity || !entity.id) {
+      return true;
+    }
+
+    // Safety guard: only delete remote folders if they are completely empty
+    if (key.endsWith("/")) {
+      const empty = await this.isFolderEmpty(key);
+      if (!empty) {
+        console.warn(
+          `Skipped deleting remote folder "${key}" because it still contains active files on Google Drive.`
+        );
+        return false;
+      }
     }
 
     const token = await this.getAccessToken();
@@ -428,7 +545,9 @@ export class GoogleDriveApi {
         },
       });
       if (resp.status !== 200 && resp.status !== 204) {
-        throw new Error(`Failed to permanently delete "${key}": ${resp.text}`);
+        throw new Error(
+          `Failed to permanently delete "${key}": ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        );
       }
     } else {
       // Trash file/folder
@@ -442,13 +561,16 @@ export class GoogleDriveApi {
         body: JSON.stringify({ trashed: true }),
       });
       if (resp.status !== 200) {
-        throw new Error(`Failed to trash "${key}": ${resp.text}`);
+        throw new Error(
+          `Failed to trash "${key}": ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        );
       }
     }
 
     this.pathToEntity.delete(key);
     const cleanKey = key.replace(/\/+$/, "");
     this.folderPathToId.delete(cleanKey);
+    return true;
   }
 
   private async ensureParentFolderExists(childKey: string): Promise<string> {
@@ -645,7 +767,12 @@ export class GoogleDriveApi {
     });
 
     if (resp.status === 200 && resp.json.files?.length > 0) {
-      const file = resp.json.files[0];
+      const sorted = resp.json.files.sort((a: any, b: any) => {
+        const tA = a.modifiedTime ? Date.parse(a.modifiedTime) : 0;
+        const tB = b.modifiedTime ? Date.parse(b.modifiedTime) : 0;
+        return tB - tA;
+      });
+      const file = sorted[0];
       const entity: FsEntity = {
         key,
         isFolder: file.mimeType === FOLDER_MIME,

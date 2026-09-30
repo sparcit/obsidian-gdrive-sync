@@ -1,4 +1,4 @@
-import { normalizePath, type Vault } from "obsidian";
+import { normalizePath, TFile, TFolder, type Vault } from "obsidian";
 import type { FsEntity } from "./types";
 
 export class FsLocal {
@@ -127,7 +127,7 @@ export class FsLocal {
   }
 
   /**
-   * Writes binary data to a file, ensuring parent folders exist
+   * Writes binary data using Obsidian's Vault API (notifies active editor tabs to avoid overwrites)
    */
   public async writeFile(key: string, data: ArrayBuffer): Promise<void> {
     const normalized = normalizePath(key);
@@ -137,7 +137,12 @@ export class FsLocal {
       await this.vault.adapter.mkdir(parentFolder);
     }
 
-    await this.vault.adapter.writeBinary(normalized, data);
+    const abstractFile = this.vault.getAbstractFileByPath(normalized);
+    if (abstractFile instanceof TFile) {
+      await this.vault.modifyBinary(abstractFile, data);
+    } else {
+      await this.vault.createBinary(normalized, data);
+    }
   }
 
   /**
@@ -153,11 +158,18 @@ export class FsLocal {
   }
 
   /**
-   * Deletes a file (prefers local trash for safety)
+   * Deletes a file safely via Obsidian's Vault API
    */
   public async deleteFile(key: string): Promise<void> {
     const normalized = normalizePath(key);
-    if (await this.vault.adapter.exists(normalized)) {
+    const file = this.vault.getAbstractFileByPath(normalized);
+    if (file instanceof TFile) {
+      try {
+        await this.vault.trash(file, true);
+      } catch {
+        await this.vault.adapter.remove(normalized);
+      }
+    } else if (await this.vault.adapter.exists(normalized)) {
       try {
         await this.vault.adapter.trashLocal(normalized);
       } catch {
@@ -167,19 +179,46 @@ export class FsLocal {
   }
 
   /**
-   * Deletes a folder
+   * Checks if a folder has zero files and zero subfolders
    */
-  public async deleteFolder(key: string): Promise<void> {
+  public async isFolderEmpty(key: string): Promise<boolean> {
     const normalized = normalizePath(key.replace(/\/+$/, ""));
-    if (!normalized) return;
-
-    if (await this.vault.adapter.exists(normalized)) {
-      try {
-        await this.vault.adapter.trashLocal(normalized);
-      } catch {
-        await this.vault.adapter.remove(normalized);
-      }
+    if (!normalized || !(await this.vault.adapter.exists(normalized))) {
+      return true;
     }
+    const listing = await this.vault.adapter.list(normalized);
+    return listing.files.length === 0 && listing.folders.length === 0;
+  }
+
+  /**
+   * Deletes a folder ONLY if it is completely empty
+   */
+  public async deleteFolder(key: string): Promise<boolean> {
+    const normalized = normalizePath(key.replace(/\/+$/, ""));
+    if (!normalized) return false;
+
+    // Safety guard: only delete empty folders
+    if (!(await this.isFolderEmpty(normalized))) {
+      console.warn(
+        `Skipped deleting local folder "${normalized}" because it is not empty.`
+      );
+      return false;
+    }
+
+    const folder = this.vault.getAbstractFileByPath(normalized);
+    if (folder instanceof TFolder) {
+      try {
+        await this.vault.trash(folder, true);
+        return true;
+      } catch {
+        await this.vault.adapter.rmdir(normalized, false);
+        return true;
+      }
+    } else if (await this.vault.adapter.exists(normalized)) {
+      await this.vault.adapter.rmdir(normalized, false);
+      return true;
+    }
+    return false;
   }
 
   /**

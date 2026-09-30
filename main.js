@@ -33,7 +33,7 @@ var import_obsidian5 = require("obsidian");
 // src/googleDriveApi.ts
 var import_obsidian = require("obsidian");
 var FOLDER_MIME = "application/vnd.google-apps.folder";
-var GoogleDriveApi = class {
+var GoogleDriveApi = class _GoogleDriveApi {
   constructor(config, vaultName, remoteBaseDir, onConfigUpdate) {
     this.rootFolderId = null;
     this.pathToEntity = /* @__PURE__ */ new Map();
@@ -47,8 +47,52 @@ var GoogleDriveApi = class {
     this.config = newConfig;
     if (newBaseDir !== void 0) {
       this.remoteBaseDir = newBaseDir.trim() || this.vaultName;
-      this.rootFolderId = null;
+      this.clearCache();
     }
+  }
+  /**
+   * Clears in-memory path and folder ID caches so stale IDs are never reused
+   */
+  clearCache() {
+    this.rootFolderId = null;
+    this.pathToEntity.clear();
+    this.folderPathToId.clear();
+  }
+  static formatGoogleError(rawText, status) {
+    try {
+      const json = JSON.parse(rawText);
+      const err = json.error;
+      const code = typeof err === "string" ? err : err?.message || err?.status || "";
+      const desc = json.error_description || (typeof err === "object" ? err?.message : "") || "";
+      const full = `${code} ${desc}`;
+      if (full.includes("invalid_grant")) {
+        return "Google authorization expired or was revoked. Please reconnect your account in Settings.";
+      }
+      if (full.includes("invalid_client")) {
+        return "Invalid Google Client ID or Client Secret. Please verify your credentials in Settings.";
+      }
+      if (full.includes("access_denied")) {
+        return "Access denied on Google consent screen.";
+      }
+      if (full.includes("insufficientPermissions") || full.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")) {
+        return "Insufficient Google Drive permissions. Ensure the scope 'https://www.googleapis.com/auth/drive.file' is added in your Google Cloud Console.";
+      }
+      if (full.includes("rateLimitExceeded") || full.includes("userRateLimitExceeded")) {
+        return "Google Drive API rate limit reached. Please wait a moment before syncing again.";
+      }
+      if (desc)
+        return desc;
+      if (err?.message)
+        return err.message;
+    } catch {
+    }
+    if (rawText.includes("invalid_grant")) {
+      return "Google authorization expired or was revoked. Please reconnect your account in Settings.";
+    }
+    if (rawText.includes("invalid_client")) {
+      return "Invalid Google Client ID or Client Secret. Please verify your credentials in Settings.";
+    }
+    return rawText || `HTTP ${status || "unknown error"}`;
   }
   /**
    * Retrieves a valid access token, automatically refreshing if needed
@@ -79,7 +123,7 @@ var GoogleDriveApi = class {
     });
     if (resp.status !== 200) {
       throw new Error(
-        `Failed to refresh Google Drive access token: ${resp.text}`
+        `Failed to refresh Google Drive access token: ${_GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
       );
     }
     const data = resp.json;
@@ -117,7 +161,10 @@ var GoogleDriveApi = class {
     if (this.rootFolderId) {
       return this.rootFolderId;
     }
-    const segments = this.remoteBaseDir.split("/").map((s) => s.trim()).filter((s) => s.length > 0);
+    let segments = this.remoteBaseDir.split("/").map((s) => s.trim()).filter((s) => s.length > 0);
+    if (segments.length > 0 && (segments[0].toLowerCase() === "my drive" || segments[0].toLowerCase() === "mydrive")) {
+      segments = segments.slice(1);
+    }
     let parentId = "root";
     let cumulativePath = "";
     for (const segment of segments) {
@@ -147,7 +194,12 @@ var GoogleDriveApi = class {
       }
     });
     if (searchResp.status === 200 && searchResp.json.files?.length > 0) {
-      return searchResp.json.files[0].id;
+      const sorted = searchResp.json.files.sort((a, b) => {
+        const tA = a.modifiedTime ? Date.parse(a.modifiedTime) : 0;
+        const tB = b.modifiedTime ? Date.parse(b.modifiedTime) : 0;
+        return tB - tA;
+      });
+      return sorted[0].id;
     }
     const createResp = await (0, import_obsidian.requestUrl)({
       url: "https://www.googleapis.com/drive/v3/files",
@@ -171,8 +223,8 @@ var GoogleDriveApi = class {
    * Recursively walks all files and folders inside the remote vault
    */
   async walk() {
+    this.clearCache();
     const rootId = await this.initRootFolder();
-    this.pathToEntity.clear();
     const allEntities = [];
     const queue = [
       { folderId: rootId, folderPath: "" }
@@ -198,7 +250,7 @@ var GoogleDriveApi = class {
         });
         if (resp.status !== 200) {
           throw new Error(
-            `Failed to list files in folder "${folderPath}": ${resp.text}`
+            `Failed to list files in folder "${folderPath}": ${_GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
           );
         }
         const files = resp.json.files || [];
@@ -216,6 +268,15 @@ var GoogleDriveApi = class {
             id: file.id,
             parentID: folderId
           };
+          const existing = this.pathToEntity.get(normalizedKey);
+          if (existing) {
+            if (entity.mtime <= existing.mtime) {
+              continue;
+            }
+            const idx = allEntities.findIndex((e) => e.key === normalizedKey);
+            if (idx >= 0)
+              allEntities.splice(idx, 1);
+          }
           this.pathToEntity.set(normalizedKey, entity);
           allEntities.push(entity);
           if (isFolder) {
@@ -344,12 +405,46 @@ var GoogleDriveApi = class {
     return entity;
   }
   /**
-   * Deletes (or trashes) a file or folder on Google Drive
+   * Checks if a remote Google Drive folder is completely empty (no non-trashed children)
+   */
+  async isFolderEmpty(key) {
+    const entity = this.pathToEntity.get(key) || await this.lookupEntity(key);
+    if (!entity || !entity.id) {
+      return true;
+    }
+    const token = await this.getAccessToken();
+    const query = `'${entity.id}' in parents and trashed = false`;
+    const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+      query
+    )}&pageSize=1&fields=files(id)`;
+    const resp = await (0, import_obsidian.requestUrl)({
+      url,
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+    if (resp.status === 200 && resp.json.files) {
+      return resp.json.files.length === 0;
+    }
+    return true;
+  }
+  /**
+   * Deletes (or trashes) a file or folder on Google Drive ONLY if folder is empty
    */
   async rm(key, permanent = false) {
     const entity = this.pathToEntity.get(key) || await this.lookupEntity(key);
     if (!entity || !entity.id) {
-      return;
+      return true;
+    }
+    if (key.endsWith("/")) {
+      const empty = await this.isFolderEmpty(key);
+      if (!empty) {
+        console.warn(
+          `Skipped deleting remote folder "${key}" because it still contains active files on Google Drive.`
+        );
+        return false;
+      }
     }
     const token = await this.getAccessToken();
     if (permanent) {
@@ -361,7 +456,9 @@ var GoogleDriveApi = class {
         }
       });
       if (resp.status !== 200 && resp.status !== 204) {
-        throw new Error(`Failed to permanently delete "${key}": ${resp.text}`);
+        throw new Error(
+          `Failed to permanently delete "${key}": ${_GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        );
       }
     } else {
       const resp = await (0, import_obsidian.requestUrl)({
@@ -374,12 +471,15 @@ var GoogleDriveApi = class {
         body: JSON.stringify({ trashed: true })
       });
       if (resp.status !== 200) {
-        throw new Error(`Failed to trash "${key}": ${resp.text}`);
+        throw new Error(
+          `Failed to trash "${key}": ${_GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        );
       }
     }
     this.pathToEntity.delete(key);
     const cleanKey = key.replace(/\/+$/, "");
     this.folderPathToId.delete(cleanKey);
+    return true;
   }
   async ensureParentFolderExists(childKey) {
     const clean = childKey.replace(/\/+$/, "");
@@ -525,7 +625,12 @@ var GoogleDriveApi = class {
       }
     });
     if (resp.status === 200 && resp.json.files?.length > 0) {
-      const file = resp.json.files[0];
+      const sorted = resp.json.files.sort((a, b) => {
+        const tA = a.modifiedTime ? Date.parse(a.modifiedTime) : 0;
+        const tB = b.modifiedTime ? Date.parse(b.modifiedTime) : 0;
+        return tB - tA;
+      });
+      const file = sorted[0];
       const entity = {
         key,
         isFolder: file.mimeType === FOLDER_MIME,
@@ -635,7 +740,7 @@ var FsLocal = class {
     return await this.vault.adapter.readBinary(normalized);
   }
   /**
-   * Writes binary data to a file, ensuring parent folders exist
+   * Writes binary data using Obsidian's Vault API (notifies active editor tabs to avoid overwrites)
    */
   async writeFile(key, data) {
     const normalized = (0, import_obsidian2.normalizePath)(key);
@@ -643,7 +748,12 @@ var FsLocal = class {
     if (parentFolder && !await this.vault.adapter.exists(parentFolder)) {
       await this.vault.adapter.mkdir(parentFolder);
     }
-    await this.vault.adapter.writeBinary(normalized, data);
+    const abstractFile = this.vault.getAbstractFileByPath(normalized);
+    if (abstractFile instanceof import_obsidian2.TFile) {
+      await this.vault.modifyBinary(abstractFile, data);
+    } else {
+      await this.vault.createBinary(normalized, data);
+    }
   }
   /**
    * Creates a directory if it does not already exist
@@ -657,11 +767,18 @@ var FsLocal = class {
     }
   }
   /**
-   * Deletes a file (prefers local trash for safety)
+   * Deletes a file safely via Obsidian's Vault API
    */
   async deleteFile(key) {
     const normalized = (0, import_obsidian2.normalizePath)(key);
-    if (await this.vault.adapter.exists(normalized)) {
+    const file = this.vault.getAbstractFileByPath(normalized);
+    if (file instanceof import_obsidian2.TFile) {
+      try {
+        await this.vault.trash(file, true);
+      } catch {
+        await this.vault.adapter.remove(normalized);
+      }
+    } else if (await this.vault.adapter.exists(normalized)) {
       try {
         await this.vault.adapter.trashLocal(normalized);
       } catch {
@@ -670,19 +787,43 @@ var FsLocal = class {
     }
   }
   /**
-   * Deletes a folder
+   * Checks if a folder has zero files and zero subfolders
+   */
+  async isFolderEmpty(key) {
+    const normalized = (0, import_obsidian2.normalizePath)(key.replace(/\/+$/, ""));
+    if (!normalized || !await this.vault.adapter.exists(normalized)) {
+      return true;
+    }
+    const listing = await this.vault.adapter.list(normalized);
+    return listing.files.length === 0 && listing.folders.length === 0;
+  }
+  /**
+   * Deletes a folder ONLY if it is completely empty
    */
   async deleteFolder(key) {
     const normalized = (0, import_obsidian2.normalizePath)(key.replace(/\/+$/, ""));
     if (!normalized)
-      return;
-    if (await this.vault.adapter.exists(normalized)) {
-      try {
-        await this.vault.adapter.trashLocal(normalized);
-      } catch {
-        await this.vault.adapter.remove(normalized);
-      }
+      return false;
+    if (!await this.isFolderEmpty(normalized)) {
+      console.warn(
+        `Skipped deleting local folder "${normalized}" because it is not empty.`
+      );
+      return false;
     }
+    const folder = this.vault.getAbstractFileByPath(normalized);
+    if (folder instanceof import_obsidian2.TFolder) {
+      try {
+        await this.vault.trash(folder, true);
+        return true;
+      } catch {
+        await this.vault.adapter.rmdir(normalized, false);
+        return true;
+      }
+    } else if (await this.vault.adapter.exists(normalized)) {
+      await this.vault.adapter.rmdir(normalized, false);
+      return true;
+    }
+    return false;
   }
   /**
    * Gets stats of a file or folder
@@ -776,6 +917,131 @@ var LocalDb = class {
   }
 };
 
+// src/md5.ts
+function safeAdd(x, y) {
+  const lsw = (x & 65535) + (y & 65535);
+  const msw = (x >> 16) + (y >> 16) + (lsw >> 16);
+  return msw << 16 | lsw & 65535;
+}
+function bitRotateLeft(num, cnt) {
+  return num << cnt | num >>> 32 - cnt;
+}
+function md5cmn(q, a, b, x, s, t) {
+  return safeAdd(bitRotateLeft(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b);
+}
+function md5ff(a, b, c, d, x, s, t) {
+  return md5cmn(b & c | ~b & d, a, b, x, s, t);
+}
+function md5gg(a, b, c, d, x, s, t) {
+  return md5cmn(b & d | c & ~d, a, b, x, s, t);
+}
+function md5hh(a, b, c, d, x, s, t) {
+  return md5cmn(b ^ c ^ d, a, b, x, s, t);
+}
+function md5ii(a, b, c, d, x, s, t) {
+  return md5cmn(c ^ (b | ~d), a, b, x, s, t);
+}
+function md5(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.length;
+  const nWords = (len + 8 >> 6) + 1;
+  const words = new Int32Array(nWords * 16);
+  for (let i = 0; i < len; i++) {
+    words[i >> 2] |= bytes[i] << i % 4 * 8;
+  }
+  words[len >> 2] |= 128 << len % 4 * 8;
+  words[nWords * 16 - 2] = len * 8;
+  let a = 1732584193;
+  let b = -271733879;
+  let c = -1732584194;
+  let d = 271733878;
+  for (let i = 0; i < words.length; i += 16) {
+    const olda = a;
+    const oldb = b;
+    const oldc = c;
+    const oldd = d;
+    a = md5ff(a, b, c, d, words[i], 7, -680876936);
+    d = md5ff(d, a, b, c, words[i + 1], 12, -389564586);
+    c = md5ff(c, d, a, b, words[i + 2], 17, 606105819);
+    b = md5ff(b, c, d, a, words[i + 3], 22, -1044525330);
+    a = md5ff(a, b, c, d, words[i + 4], 7, -176418897);
+    d = md5ff(d, a, b, c, words[i + 5], 12, 1200080426);
+    c = md5ff(c, d, a, b, words[i + 6], 17, -1473231341);
+    b = md5ff(b, c, d, a, words[i + 7], 22, -45705983);
+    a = md5ff(a, b, c, d, words[i + 8], 7, 1770035416);
+    d = md5ff(d, a, b, c, words[i + 9], 12, -1958414417);
+    c = md5ff(c, d, a, b, words[i + 10], 17, -42063);
+    b = md5ff(b, c, d, a, words[i + 11], 22, -1990404162);
+    a = md5ff(a, b, c, d, words[i + 12], 7, 1804603682);
+    d = md5ff(d, a, b, c, words[i + 13], 12, -40341101);
+    c = md5ff(c, d, a, b, words[i + 14], 17, -1502002290);
+    b = md5ff(b, c, d, a, words[i + 15], 22, 1236535329);
+    a = md5gg(a, b, c, d, words[i + 1], 5, -165796510);
+    d = md5gg(d, a, b, c, words[i + 6], 9, -1069501632);
+    c = md5gg(c, d, a, b, words[i + 11], 14, 643717713);
+    b = md5gg(b, c, d, a, words[i], 20, -373897302);
+    a = md5gg(a, b, c, d, words[i + 5], 5, -701558691);
+    d = md5gg(d, a, b, c, words[i + 10], 9, 38016083);
+    c = md5gg(c, d, a, b, words[i + 15], 14, -660478335);
+    b = md5gg(b, c, d, a, words[i + 4], 20, -405537848);
+    a = md5gg(a, b, c, d, words[i + 9], 5, 568446438);
+    d = md5gg(d, a, b, c, words[i + 14], 9, -1019803690);
+    c = md5gg(c, d, a, b, words[i + 3], 14, -187363961);
+    b = md5gg(b, c, d, a, words[i + 8], 20, 1163531501);
+    a = md5gg(a, b, c, d, words[i + 13], 5, -1444681467);
+    d = md5gg(d, a, b, c, words[i + 2], 9, -51403784);
+    c = md5gg(c, d, a, b, words[i + 7], 14, 1735328473);
+    b = md5gg(b, c, d, a, words[i + 12], 20, -1926607734);
+    a = md5hh(a, b, c, d, words[i + 5], 4, -378558);
+    d = md5hh(d, a, b, c, words[i + 8], 11, -2022574463);
+    c = md5hh(c, d, a, b, words[i + 11], 16, 1839030562);
+    b = md5hh(b, c, d, a, words[i + 14], 23, -35309556);
+    a = md5hh(a, b, c, d, words[i + 1], 4, -1530992060);
+    d = md5hh(d, a, b, c, words[i + 4], 11, 1272893353);
+    c = md5hh(c, d, a, b, words[i + 7], 16, -155497632);
+    b = md5hh(b, c, d, a, words[i + 10], 23, -1094730640);
+    a = md5hh(a, b, c, d, words[i + 13], 4, 681279174);
+    d = md5hh(d, a, b, c, words[i], 11, -358537222);
+    c = md5hh(c, d, a, b, words[i + 3], 16, -722521979);
+    b = md5hh(b, c, d, a, words[i + 6], 23, 76029189);
+    a = md5hh(a, b, c, d, words[i + 9], 4, -640364487);
+    d = md5hh(d, a, b, c, words[i + 12], 11, -421815835);
+    c = md5hh(c, d, a, b, words[i + 15], 16, 530742520);
+    b = md5hh(b, c, d, a, words[i + 2], 23, -995338651);
+    a = md5ii(a, b, c, d, words[i], 6, -198630844);
+    d = md5ii(d, a, b, c, words[i + 7], 10, 1126891415);
+    c = md5ii(c, d, a, b, words[i + 14], 15, -1416354905);
+    b = md5ii(b, c, d, a, words[i + 5], 21, -57434055);
+    a = md5ii(a, b, c, d, words[i + 12], 6, 1700485571);
+    d = md5ii(d, a, b, c, words[i + 3], 10, -1894986606);
+    c = md5ii(c, d, a, b, words[i + 10], 15, -1051523);
+    b = md5ii(b, c, d, a, words[i + 1], 21, -2054922799);
+    a = md5ii(a, b, c, d, words[i + 8], 6, 1873313359);
+    d = md5ii(d, a, b, c, words[i + 15], 10, -30611744);
+    c = md5ii(c, d, a, b, words[i + 6], 15, -1560198380);
+    b = md5ii(b, c, d, a, words[i + 13], 21, 1309151649);
+    a = md5ii(a, b, c, d, words[i + 4], 6, -145523070);
+    d = md5ii(d, a, b, c, words[i + 11], 10, -1120210379);
+    c = md5ii(c, d, a, b, words[i + 2], 15, 718787259);
+    b = md5ii(b, c, d, a, words[i + 9], 21, -343485551);
+    a = safeAdd(a, olda);
+    b = safeAdd(b, oldb);
+    c = safeAdd(c, oldc);
+    d = safeAdd(d, oldd);
+  }
+  const hexChars = "0123456789abcdef";
+  let output = "";
+  const resultWords = [a, b, c, d];
+  for (let i = 0; i < 4; i++) {
+    const word = resultWords[i];
+    for (let j = 0; j < 4; j++) {
+      const byte = word >> j * 8 & 255;
+      output += hexChars.charAt(byte >> 4 & 15) + hexChars.charAt(byte & 15);
+    }
+  }
+  return output;
+}
+
 // src/syncEngine.ts
 var SyncEngine = class {
   constructor(localFs, driveApi, db, settings) {
@@ -787,7 +1053,7 @@ var SyncEngine = class {
   /**
    * Plans the synchronization actions by comparing local, remote, and previous sync state
    */
-  planSync(localEntities, remoteEntities) {
+  async planSync(localEntities, remoteEntities) {
     const localMap = /* @__PURE__ */ new Map();
     for (const e of localEntities)
       localMap.set(e.key, e);
@@ -809,6 +1075,14 @@ var SyncEngine = class {
       const remote = remoteMap.get(key);
       const prev = prevMap.get(key);
       const isFolder = key.endsWith("/");
+      if (!isFolder && !prev && local && remote && local.size === remote.size && remote.hash && !local.hash) {
+        try {
+          const content = await this.localFs.readFile(key);
+          local.hash = md5(content);
+        } catch (err) {
+          console.warn(`Could not compute MD5 for local file "${key}":`, err);
+        }
+      }
       const decision = this.decideItem(
         key,
         isFolder,
@@ -819,6 +1093,29 @@ var SyncEngine = class {
         this.settings.conflictAction
       );
       decisions.push(decision);
+    }
+    for (const d of decisions) {
+      if (d.isFolder && (d.action === "delete_local_folder" || d.action === "delete_remote_folder")) {
+        const folderKey = d.key;
+        const hasActiveChildren = decisions.some((child) => {
+          if (child.key === folderKey || !child.key.startsWith(folderKey)) {
+            return false;
+          }
+          const isChildDeletion = child.action === "delete_local" || child.action === "delete_remote" || child.action === "delete_local_folder" || child.action === "delete_remote_folder" || child.action === "skip";
+          return !isChildDeletion;
+        });
+        if (hasActiveChildren) {
+          if (d.action === "delete_local_folder") {
+            d.action = d.remoteEntity ? "equal" : "create_remote_folder";
+            d.isChange = !d.remoteEntity;
+            d.reason = "Folder deletion cancelled: folder contains active or modified notes";
+          } else if (d.action === "delete_remote_folder") {
+            d.action = d.localEntity ? "equal" : "create_local_folder";
+            d.isChange = !d.localEntity;
+            d.reason = "Folder deletion cancelled: folder contains active or modified notes";
+          }
+        }
+      }
     }
     return decisions;
   }
@@ -1158,6 +1455,7 @@ var SyncEngine = class {
         }
       }
     }
+    await this.db.save();
     const activeChanges = decisions.filter((d) => d.isChange);
     const totalCount = activeChanges.length;
     const folderCreations = activeChanges.filter(
@@ -1186,17 +1484,26 @@ var SyncEngine = class {
         errors.push({ key: d.key, error: err.message || String(err) });
       }
     }
+    if (folderCreations.length > 0) {
+      await this.db.save();
+    }
     const fileOperations = activeChanges.filter(
       (d) => !d.isFolder && d.action !== "delete_local" && d.action !== "delete_remote"
     );
     const CONCURRENCY = 3;
     let fileOpIndex = 0;
+    let completedOpsSinceSave = 0;
     const worker = async () => {
       while (fileOpIndex < fileOperations.length) {
         const d = fileOperations[fileOpIndex++];
         try {
           await this.executeFileOperation(d);
           syncedCount++;
+          completedOpsSinceSave++;
+          if (completedOpsSinceSave >= 5) {
+            completedOpsSinceSave = 0;
+            await this.db.save();
+          }
           onProgress?.(
             syncedCount,
             totalCount,
@@ -1210,6 +1517,7 @@ var SyncEngine = class {
     };
     const workers = Array.from({ length: CONCURRENCY }, () => worker());
     await Promise.all(workers);
+    await this.db.save();
     const fileDeletions = activeChanges.filter(
       (d) => !d.isFolder && (d.action === "delete_local" || d.action === "delete_remote")
     );
@@ -1227,20 +1535,30 @@ var SyncEngine = class {
         errors.push({ key: d.key, error: err.message || String(err) });
       }
     }
+    if (fileDeletions.length > 0) {
+      await this.db.save();
+    }
     const folderDeletions = activeChanges.filter(
       (d) => d.isFolder && (d.action === "delete_local_folder" || d.action === "delete_remote_folder")
     );
     folderDeletions.sort((a, b) => b.key.length - a.key.length);
     for (const d of folderDeletions) {
       try {
+        let deleted = false;
         if (d.action === "delete_local_folder") {
-          await this.localFs.deleteFolder(d.key);
+          deleted = await this.localFs.deleteFolder(d.key);
         } else if (d.action === "delete_remote_folder") {
-          await this.driveApi.rm(d.key);
+          deleted = await this.driveApi.rm(d.key);
         }
-        this.db.deleteRecord(d.key);
-        syncedCount++;
-        onProgress?.(syncedCount, totalCount, `Deleted folder: ${d.key}`, d.key);
+        if (deleted) {
+          this.db.deleteRecord(d.key);
+          syncedCount++;
+          onProgress?.(syncedCount, totalCount, `Deleted folder: ${d.key}`, d.key);
+        } else {
+          console.warn(
+            `Folder "${d.key}" was not deleted because it is not empty.`
+          );
+        }
       } catch (err) {
         errors.push({ key: d.key, error: err.message || String(err) });
       }
@@ -1253,80 +1571,123 @@ var SyncEngine = class {
     await this.db.save();
     return { syncedCount, errors };
   }
+  /**
+   * Uploads a file with mid-upload modification guard (Typing-during-upload bug fix)
+   */
+  async uploadFileWithGuard(key, forcedMtime) {
+    const now = Date.now();
+    const statBefore = await this.localFs.stat(key);
+    if (!statBefore) {
+      return false;
+    }
+    const content = await this.localFs.readFile(key);
+    const mtimeToUse = forcedMtime ?? statBefore.mtime;
+    const uploaded = await this.driveApi.writeFile(key, content, mtimeToUse);
+    const statAfter = await this.localFs.stat(key);
+    const changedMidUpload = !statAfter || statAfter.mtime !== statBefore.mtime || statAfter.size !== statBefore.size;
+    if (changedMidUpload) {
+      console.warn(
+        `File "${key}" was modified during upload. Recording pre-upload snapshot so next sync uploads the mid-upload edit.`
+      );
+      this.db.upsertRecord({
+        key,
+        isFolder: false,
+        localSize: statBefore.size,
+        localMtime: statBefore.mtime,
+        remoteHash: uploaded.hash,
+        remoteMtime: uploaded.mtime,
+        remoteSize: uploaded.size,
+        syncTime: now
+      });
+      return false;
+    }
+    this.db.upsertRecord({
+      key,
+      isFolder: false,
+      localSize: statBefore.size,
+      localMtime: statBefore.mtime,
+      remoteHash: uploaded.hash,
+      remoteMtime: uploaded.mtime,
+      remoteSize: uploaded.size,
+      syncTime: now
+    });
+    return true;
+  }
+  /**
+   * Downloads a file with mid-sync local modification guard
+   */
+  async downloadFileWithGuard(d) {
+    const now = Date.now();
+    const statCurrent = await this.localFs.stat(d.key);
+    const localModifiedMidSync = statCurrent && d.localEntity && (statCurrent.mtime !== d.localEntity.mtime || statCurrent.size !== d.localEntity.size);
+    const localCreatedMidSync = statCurrent && !d.localEntity;
+    if (localModifiedMidSync || localCreatedMidSync) {
+      console.warn(
+        `Local file "${d.key}" changed during sync download. Creating conflict copy.`
+      );
+      const remoteContent = await this.driveApi.readFile(d.key);
+      const conflictKey = this.generateConflictPath(d.key);
+      await this.localFs.writeFile(conflictKey, remoteContent);
+      const conflictStat = await this.localFs.stat(conflictKey);
+      this.db.upsertRecord({
+        key: conflictKey,
+        isFolder: false,
+        localSize: remoteContent.byteLength,
+        localMtime: conflictStat?.mtime ?? now,
+        remoteHash: d.remoteEntity?.hash,
+        remoteMtime: d.remoteEntity?.mtime,
+        remoteSize: d.remoteEntity?.size ?? remoteContent.byteLength,
+        syncTime: now
+      });
+      const uploadedConflict = await this.driveApi.writeFile(
+        conflictKey,
+        remoteContent,
+        d.remoteEntity?.mtime
+      );
+      this.db.upsertRecord({
+        key: conflictKey,
+        isFolder: false,
+        localSize: remoteContent.byteLength,
+        localMtime: conflictStat?.mtime ?? now,
+        remoteHash: uploadedConflict.hash,
+        remoteMtime: uploadedConflict.mtime,
+        remoteSize: uploadedConflict.size,
+        syncTime: now
+      });
+      return;
+    }
+    const content = await this.driveApi.readFile(d.key);
+    await this.localFs.writeFile(d.key, content);
+    const localStat = await this.localFs.stat(d.key);
+    this.db.upsertRecord({
+      key: d.key,
+      isFolder: false,
+      localSize: content.byteLength,
+      localMtime: localStat?.mtime ?? now,
+      remoteHash: d.remoteEntity?.hash,
+      remoteMtime: d.remoteEntity?.mtime,
+      remoteSize: d.remoteEntity?.size ?? content.byteLength,
+      syncTime: now
+    });
+  }
   async executeFileOperation(d) {
     const now = Date.now();
     switch (d.action) {
       case "upload":
       case "conflict_keep_local": {
-        const content = await this.localFs.readFile(d.key);
-        const uploaded = await this.driveApi.writeFile(
-          d.key,
-          content,
-          d.localEntity?.mtime
-        );
-        const localStat = await this.localFs.stat(d.key);
-        this.db.upsertRecord({
-          key: d.key,
-          isFolder: false,
-          localSize: content.byteLength,
-          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
-          remoteHash: uploaded.hash,
-          remoteMtime: uploaded.mtime,
-          remoteSize: uploaded.size,
-          syncTime: now
-        });
+        await this.uploadFileWithGuard(d.key, d.localEntity?.mtime);
         break;
       }
       case "download":
       case "conflict_keep_remote": {
-        const content = await this.driveApi.readFile(d.key);
-        await this.localFs.writeFile(d.key, content);
-        const localStat = await this.localFs.stat(d.key);
-        this.db.upsertRecord({
-          key: d.key,
-          isFolder: false,
-          localSize: content.byteLength,
-          localMtime: localStat?.mtime ?? now,
-          remoteHash: d.remoteEntity?.hash,
-          remoteMtime: d.remoteEntity?.mtime,
-          remoteSize: d.remoteEntity?.size ?? content.byteLength,
-          syncTime: now
-        });
+        await this.downloadFileWithGuard(d);
         break;
       }
       case "conflict_keep_newer": {
         if (d.localEntity && d.remoteEntity && d.localEntity.mtime >= d.remoteEntity.mtime) {
-          const content = await this.localFs.readFile(d.key);
-          const uploaded = await this.driveApi.writeFile(
-            d.key,
-            content,
-            d.localEntity.mtime
-          );
-          const localStat = await this.localFs.stat(d.key);
-          this.db.upsertRecord({
-            key: d.key,
-            isFolder: false,
-            localSize: content.byteLength,
-            localMtime: localStat?.mtime ?? d.localEntity.mtime,
-            remoteHash: uploaded.hash,
-            remoteMtime: uploaded.mtime,
-            remoteSize: uploaded.size,
-            syncTime: now
-          });
+          await this.uploadFileWithGuard(d.key, d.localEntity.mtime);
         } else {
-          const content = await this.driveApi.readFile(d.key);
-          await this.localFs.writeFile(d.key, content);
-          const localStat = await this.localFs.stat(d.key);
-          this.db.upsertRecord({
-            key: d.key,
-            isFolder: false,
-            localSize: content.byteLength,
-            localMtime: localStat?.mtime ?? now,
-            remoteHash: d.remoteEntity?.hash,
-            remoteMtime: d.remoteEntity?.mtime,
-            remoteSize: d.remoteEntity?.size ?? content.byteLength,
-            syncTime: now
-          });
+          await this.downloadFileWithGuard(d);
         }
         break;
       }
@@ -1335,23 +1696,7 @@ var SyncEngine = class {
         const conflictKey = this.generateConflictPath(d.key);
         await this.localFs.writeFile(conflictKey, remoteContent);
         const conflictStat = await this.localFs.stat(conflictKey);
-        const localContent = await this.localFs.readFile(d.key);
-        const uploaded = await this.driveApi.writeFile(
-          d.key,
-          localContent,
-          d.localEntity?.mtime
-        );
-        const localStat = await this.localFs.stat(d.key);
-        this.db.upsertRecord({
-          key: d.key,
-          isFolder: false,
-          localSize: localContent.byteLength,
-          localMtime: localStat?.mtime ?? d.localEntity?.mtime ?? now,
-          remoteHash: uploaded.hash,
-          remoteMtime: uploaded.mtime,
-          remoteSize: uploaded.size,
-          syncTime: now
-        });
+        await this.uploadFileWithGuard(d.key, d.localEntity?.mtime);
         const uploadedConflict = await this.driveApi.writeFile(
           conflictKey,
           remoteContent,
@@ -1446,7 +1791,7 @@ var GoogleOAuthDeviceFlow = class {
     });
     if (resp.status !== 200) {
       throw new Error(
-        `Failed to obtain device code from Google (${resp.status}): ${resp.text}`
+        `Failed to obtain device code from Google: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
       );
     }
     return resp.json;
@@ -1508,7 +1853,7 @@ var GoogleOAuthDeviceFlow = class {
         } else if (error === "expired_token") {
           throw new Error("The authorization session timed out. Please try again.");
         } else {
-          throw new Error(`Token polling error: ${errJson.error_description || error || resp.text}`);
+          throw new Error(`Token authorization error: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`);
         }
       } catch (err) {
         if (err.message?.includes("denied") || err.message?.includes("timed out") || err.message?.includes("cancelled")) {
@@ -1884,7 +2229,7 @@ var DEFAULT_SETTINGS = {
   },
   remoteVaultDir: "",
   syncDirection: "bidirectional",
-  conflictAction: "keep_newer",
+  conflictAction: "create_conflict_copy",
   syncOnStartup: true,
   periodicSyncIntervalMinutes: 10,
   syncOnSave: false,
@@ -2069,12 +2414,13 @@ var GDriveSyncPlugin = class extends import_obsidian5.Plugin {
       effectiveSettings
     );
     try {
+      this.driveApi.clearCache();
       this.updateStatusBar("Scanning local...");
       const localEntities = await this.localFs.walk();
       this.updateStatusBar("Scanning Google Drive...");
       const remoteEntities = await this.driveApi.walk();
       this.updateStatusBar("Planning sync...");
-      const decisions = engine.planSync(localEntities, remoteEntities);
+      const decisions = await engine.planSync(localEntities, remoteEntities);
       const changeCount = decisions.filter((d) => d.isChange).length;
       if (changeCount === 0) {
         this.settings.lastSyncTime = Date.now();
@@ -2111,12 +2457,13 @@ var GDriveSyncPlugin = class extends import_obsidian5.Plugin {
       }
     } catch (err) {
       console.error("Google Drive sync failed:", err);
+      const formatted = GoogleDriveApi.formatGoogleError(err.message || String(err));
       this.settings.lastSyncStatus = "error";
-      this.settings.lastSyncError = err.message || String(err);
+      this.settings.lastSyncError = formatted;
       await this.saveSettings();
       this.updateRibbonState("error");
       this.updateStatusBar("Sync Error");
-      new import_obsidian5.Notice(`Google Drive Sync Error: ${err.message}`);
+      new import_obsidian5.Notice(`Google Drive Sync Error: ${formatted}`);
     } finally {
       this.isSyncing = false;
       window.setTimeout(() => {

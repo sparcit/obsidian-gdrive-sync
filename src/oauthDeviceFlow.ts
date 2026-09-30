@@ -1,5 +1,6 @@
 import { App, Modal, Notice, requestUrl } from "obsidian";
 import type { DeviceCodeResponse, GoogleDriveConfig } from "./types";
+import { GoogleDriveApi } from "./googleDriveApi";
 
 export class GoogleOAuthDeviceFlow {
   /**
@@ -29,7 +30,7 @@ export class GoogleOAuthDeviceFlow {
 
     if (resp.status !== 200) {
       throw new Error(
-        `Failed to obtain device code from Google (${resp.status}): ${resp.text}`
+        `Failed to obtain device code from Google: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
       );
     }
 
@@ -110,7 +111,7 @@ export class GoogleOAuthDeviceFlow {
         } else if (error === "expired_token") {
           throw new Error("The authorization session timed out. Please try again.");
         } else {
-          throw new Error(`Token polling error: ${errJson.error_description || error || resp.text}`);
+          throw new Error(`Token authorization error: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`);
         }
       } catch (err: any) {
         if (

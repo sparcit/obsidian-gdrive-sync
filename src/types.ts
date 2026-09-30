@@ -49,7 +49,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   },
   remoteVaultDir: "",
   syncDirection: "bidirectional",
-  conflictAction: "keep_newer",
+  conflictAction: "create_conflict_copy",
   syncOnStartup: true,
   periodicSyncIntervalMinutes: 10,
   syncOnSave: false,

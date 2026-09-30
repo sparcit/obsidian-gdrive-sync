@@ -111,13 +111,13 @@ To connect Obsidian with your Google Drive, you will set up your own free Google
 
 | Setting | Description | Default |
 | :--- | :--- | :--- |
-| **Remote Vault Directory** | Folder name/path on Google Drive (e.g. `Obsidian/Personal`). | Vault Name |
+| **Remote Vault Directory** | Folder name/path on Google Drive (e.g. `Obsidian/MyVault` or `My Drive/Obsidian/MyVault`). Existing Drive folders are seamlessly reused without creating duplicates, and matching notes are paired via MD5 checksums. | Vault Name |
 | **Sync on Startup** | Initiates sync 3 seconds after opening Obsidian. | `true` |
 | **Periodic Sync** | Automatically syncs in the background every $N$ minutes. | `10 min` |
 | **Sync on File Change** | Triggers sync a few seconds after saving/editing a note. | `false` |
 | **File Change Delay** | Debounce delay before syncing modified files. | `5 seconds` |
 | **Sync Direction** | `Bidirectional`, `Push Only`, or `Pull Only`. | `Bidirectional` |
-| **Conflict Resolution** | `Keep Newer`, `Keep Local`, `Keep Remote`, or `Keep Both (Conflict Copy)`. | `Keep Newer` |
+| **Conflict Resolution** | `Keep Both (Conflict Copy)`, `Keep Newer`, `Keep Local`, or `Keep Remote`. | `Keep Both (Conflict Copy)` |
 | **Accidental Deletion Guard**| Aborts sync if more than $X\%$ of files would be deleted. | `25%` |
 | **Sync .obsidian Config** | Sync plugin configs, snippets, and hotkeys. | `false` |
 | **Ignored Patterns** | Regex patterns of paths to exclude (`.git`, `.DS_Store`, etc.). | Standard set |
