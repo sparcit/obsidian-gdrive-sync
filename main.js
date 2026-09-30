@@ -75,7 +75,7 @@ var GoogleDriveApi = class _GoogleDriveApi {
         return "Access denied on Google consent screen.";
       }
       if (full.includes("insufficientPermissions") || full.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")) {
-        return "Insufficient Google Drive permissions. Ensure the scope 'https://www.googleapis.com/auth/drive.file' is added in your Google Cloud Console.";
+        return "Insufficient Google Drive permissions. Ensure the required scope ('https://www.googleapis.com/auth/drive' or 'https://www.googleapis.com/auth/drive.file') is added to your OAuth Consent Screen in Google Cloud Console.";
       }
       if (full.includes("rateLimitExceeded") || full.includes("userRateLimitExceeded")) {
         return "Google Drive API rate limit reached. Please wait a moment before syncing again.";
@@ -2035,6 +2035,22 @@ var GDriveSyncSettingTab = class extends import_obsidian4.PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+      new import_obsidian4.Setting(card).setName("Google Drive OAuth Scope").setDesc(
+        "Use 'Full Drive Access' if syncing an existing folder (e.g. My Drive/Obsidian/MyVault). Use 'App-Created Files Only' if starting fresh."
+      ).addDropdown((drop) => {
+        drop.addOption(
+          "https://www.googleapis.com/auth/drive",
+          "Full Drive Access (Required for preexisting folders)"
+        ).addOption(
+          "https://www.googleapis.com/auth/drive.file",
+          "App-Created Files Only (Restricted)"
+        ).setValue(
+          this.plugin.settings.googleDrive.scope || "https://www.googleapis.com/auth/drive"
+        ).onChange(async (val) => {
+          this.plugin.settings.googleDrive.scope = val;
+          await this.plugin.saveSettings();
+        });
+      });
       new import_obsidian4.Setting(card).setName("Connect to Google Drive").setDesc(
         "Authorize this plugin to access your vault files using Google's secure device login"
       ).addButton((btn) => {
@@ -2225,7 +2241,7 @@ var DEFAULT_SETTINGS = {
     refreshToken: "",
     accessToken: "",
     accessTokenExpiresAtMs: 0,
-    scope: "https://www.googleapis.com/auth/drive.file"
+    scope: "https://www.googleapis.com/auth/drive"
   },
   remoteVaultDir: "",
   syncDirection: "bidirectional",

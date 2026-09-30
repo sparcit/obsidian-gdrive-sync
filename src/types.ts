@@ -45,7 +45,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     refreshToken: "",
     accessToken: "",
     accessTokenExpiresAtMs: 0,
-    scope: "https://www.googleapis.com/auth/drive.file",
+    scope: "https://www.googleapis.com/auth/drive",
   },
   remoteVaultDir: "",
   syncDirection: "bidirectional",

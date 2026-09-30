@@ -62,7 +62,7 @@ export class GoogleDriveApi {
         full.includes("insufficientPermissions") ||
         full.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
       ) {
-        return "Insufficient Google Drive permissions. Ensure the scope 'https://www.googleapis.com/auth/drive.file' is added in your Google Cloud Console.";
+        return "Insufficient Google Drive permissions. Ensure the required scope ('https://www.googleapis.com/auth/drive' or 'https://www.googleapis.com/auth/drive.file') is added to your OAuth Consent Screen in Google Cloud Console.";
       }
       if (
         full.includes("rateLimitExceeded") ||

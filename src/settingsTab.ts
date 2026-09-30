@@ -132,6 +132,31 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
         });
 
       new Setting(card)
+        .setName("Google Drive OAuth Scope")
+        .setDesc(
+          "Use 'Full Drive Access' if syncing an existing folder (e.g. My Drive/Obsidian/MyVault). Use 'App-Created Files Only' if starting fresh."
+        )
+        .addDropdown((drop) => {
+          drop
+            .addOption(
+              "https://www.googleapis.com/auth/drive",
+              "Full Drive Access (Required for preexisting folders)"
+            )
+            .addOption(
+              "https://www.googleapis.com/auth/drive.file",
+              "App-Created Files Only (Restricted)"
+            )
+            .setValue(
+              this.plugin.settings.googleDrive.scope ||
+                "https://www.googleapis.com/auth/drive"
+            )
+            .onChange(async (val) => {
+              this.plugin.settings.googleDrive.scope = val;
+              await this.plugin.saveSettings();
+            });
+        });
+
+      new Setting(card)
         .setName("Connect to Google Drive")
         .setDesc(
           "Authorize this plugin to access your vault files using Google's secure device login"
