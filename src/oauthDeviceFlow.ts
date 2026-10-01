@@ -19,22 +19,37 @@ export class GoogleOAuthDeviceFlow {
       scope: scope,
     });
 
-    const resp = await requestUrl({
-      url: "https://oauth2.googleapis.com/device/code",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: params.toString(),
-    });
-
-    if (resp.status !== 200) {
+    if (scope === "https://www.googleapis.com/auth/drive") {
       throw new Error(
-        `Failed to obtain device code from Google: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        "Google's Device Flow restricts full drive access. Please switch scope to 'App-Created Files Only' in settings, or use 'Manual Token Entry' if syncing an existing drive folder."
       );
     }
 
-    return resp.json as DeviceCodeResponse;
+    try {
+      const resp = await requestUrl({
+        url: "https://oauth2.googleapis.com/device/code",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+      });
+
+      if (resp.status !== 200) {
+        throw new Error(
+          `Failed to obtain device code from Google: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        );
+      }
+
+      return resp.json as DeviceCodeResponse;
+    } catch (err: any) {
+      if (err.status === 400 || (err.message && err.message.includes("400"))) {
+        throw new Error(
+          "Google Device Flow rejected the request (Status 400). Ensure your Google Client ID is of type 'TVs and Limited Input devices' and scope is set to 'App-Created Files Only'."
+        );
+      }
+      throw err;
+    }
   }
 
   /**

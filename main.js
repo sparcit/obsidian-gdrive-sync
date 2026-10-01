@@ -1781,20 +1781,34 @@ var GoogleOAuthDeviceFlow = class {
       client_id: clientId,
       scope
     });
-    const resp = await (0, import_obsidian3.requestUrl)({
-      url: "https://oauth2.googleapis.com/device/code",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: params.toString()
-    });
-    if (resp.status !== 200) {
+    if (scope === "https://www.googleapis.com/auth/drive") {
       throw new Error(
-        `Failed to obtain device code from Google: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        "Google's Device Flow restricts full drive access. Please switch scope to 'App-Created Files Only' in settings, or use 'Manual Token Entry' if syncing an existing drive folder."
       );
     }
-    return resp.json;
+    try {
+      const resp = await (0, import_obsidian3.requestUrl)({
+        url: "https://oauth2.googleapis.com/device/code",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: params.toString()
+      });
+      if (resp.status !== 200) {
+        throw new Error(
+          `Failed to obtain device code from Google: ${GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
+        );
+      }
+      return resp.json;
+    } catch (err) {
+      if (err.status === 400 || err.message && err.message.includes("400")) {
+        throw new Error(
+          "Google Device Flow rejected the request (Status 400). Ensure your Google Client ID is of type 'TVs and Limited Input devices' and scope is set to 'App-Created Files Only'."
+        );
+      }
+      throw err;
+    }
   }
   /**
    * Polls Google token endpoint until user approves or denies
@@ -2036,16 +2050,16 @@ var GDriveSyncSettingTab = class extends import_obsidian4.PluginSettingTab {
         });
       });
       new import_obsidian4.Setting(card).setName("Google Drive OAuth Scope").setDesc(
-        "Use 'Full Drive Access' if syncing an existing folder (e.g. My Drive/Obsidian/MyVault). Use 'App-Created Files Only' if starting fresh."
+        "For Google Device Login, select 'App-Created Files Only' (Google blocks full drive scope on device flow). To sync an existing Drive folder with Full Access, use 'Manual Token Entry' below."
       ).addDropdown((drop) => {
         drop.addOption(
-          "https://www.googleapis.com/auth/drive",
-          "Full Drive Access (Required for preexisting folders)"
-        ).addOption(
           "https://www.googleapis.com/auth/drive.file",
-          "App-Created Files Only (Restricted)"
+          "App-Created Files Only (Required for Device Flow)"
+        ).addOption(
+          "https://www.googleapis.com/auth/drive",
+          "Full Drive Access (Manual Token Entry only)"
         ).setValue(
-          this.plugin.settings.googleDrive.scope || "https://www.googleapis.com/auth/drive"
+          this.plugin.settings.googleDrive.scope || "https://www.googleapis.com/auth/drive.file"
         ).onChange(async (val) => {
           this.plugin.settings.googleDrive.scope = val;
           await this.plugin.saveSettings();
@@ -2241,7 +2255,7 @@ var DEFAULT_SETTINGS = {
     refreshToken: "",
     accessToken: "",
     accessTokenExpiresAtMs: 0,
-    scope: "https://www.googleapis.com/auth/drive"
+    scope: "https://www.googleapis.com/auth/drive.file"
   },
   remoteVaultDir: "",
   syncDirection: "bidirectional",

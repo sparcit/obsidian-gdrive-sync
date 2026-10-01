@@ -1,12 +1,13 @@
 {
   "name": "obsidian-gdrive-sync",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Two-way synchronization for Obsidian vaults with Google Drive, optimized for Android and desktop.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "esbuild tests/syncEngine.test.ts --bundle --platform=node --format=esm --outfile=tests/syncEngine.test.mjs && node --test tests/syncEngine.test.mjs"
+    "test": "esbuild tests/syncEngine.test.ts --bundle --platform=node --format=esm --outfile=tests/syncEngine.test.mjs && node --test tests/syncEngine.test.mjs",
+    "get-token": "node scripts/generate_full_access_token.mjs"
   },
   "keywords": [
     "obsidian",

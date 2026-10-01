@@ -134,21 +134,21 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
       new Setting(card)
         .setName("Google Drive OAuth Scope")
         .setDesc(
-          "Use 'Full Drive Access' if syncing an existing folder (e.g. My Drive/Obsidian/MyVault). Use 'App-Created Files Only' if starting fresh."
+          "For Google Device Login, select 'App-Created Files Only' (Google blocks full drive scope on device flow). To sync an existing Drive folder with Full Access, use 'Manual Token Entry' below."
         )
         .addDropdown((drop) => {
           drop
             .addOption(
-              "https://www.googleapis.com/auth/drive",
-              "Full Drive Access (Required for preexisting folders)"
+              "https://www.googleapis.com/auth/drive.file",
+              "App-Created Files Only (Required for Device Flow)"
             )
             .addOption(
-              "https://www.googleapis.com/auth/drive.file",
-              "App-Created Files Only (Restricted)"
+              "https://www.googleapis.com/auth/drive",
+              "Full Drive Access (Manual Token Entry only)"
             )
             .setValue(
               this.plugin.settings.googleDrive.scope ||
-                "https://www.googleapis.com/auth/drive"
+                "https://www.googleapis.com/auth/drive.file"
             )
             .onChange(async (val) => {
               this.plugin.settings.googleDrive.scope = val;

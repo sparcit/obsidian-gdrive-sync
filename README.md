@@ -105,14 +105,12 @@ To connect Obsidian with your Google Drive, you will set up your own free Google
 3. Configure the **OAuth Consent Screen**:
    - User Type: Select **External** and click **Create**.
    - App Name: `Obsidian Vault Sync` (enter your email for user support and developer contact).
-   - **Important: Choose the Correct OAuth Scope**:
-     Click **Add or Remove Scopes** and add one of the following:
-     - **For Preexisting Folders (Recommended)**:
-       `https://www.googleapis.com/auth/drive`
-       > **Why this matters**: Google's restricted `drive.file` scope *only* grants access to files and folders created by this specific application. If you want the plugin to access, read, or sync an **existing** folder in your Google Drive (such as `Obsidian/MyVault` or `My Drive/Obsidian/MyVault`), you **must** use `https://www.googleapis.com/auth/drive`.
-     - **For Sandboxed Vaults Created Entirely by the Plugin**:
-       `https://www.googleapis.com/auth/drive.file`
-       *(Use this only if you want the plugin strictly quarantined to files it creates itself and do not need to access existing Drive files).*
+   - **Important: OAuth Scope for Device Flow**:
+     Google's OAuth 2.0 Device Flow (TVs and Limited Input devices) strictly allows:
+     `https://www.googleapis.com/auth/drive.file`
+     > **Why this matters**: Google explicitly blocks `https://www.googleapis.com/auth/drive` (Full Drive Access) on the Device Code flow with HTTP 400 (`invalid_scope`).
+     > - **For mobile Device Login**: Use `https://www.googleapis.com/auth/drive.file` ("App-Created Files Only"). The plugin will create and manage your vault folder and sync all notes seamlessly.
+     > - **To sync a preexisting Drive folder**: Use **Manual Token Entry** in the plugin settings with a Refresh Token generated with full drive scope.
    - **Important: Set Publishing Status to "In Production"**:
      On the OAuth consent screen dashboard, click **"Publish App"** to set the Publishing status to **In production**.
      > **Why this matters**: In "Testing" mode, Google automatically revokes refresh tokens after **7 days**, forcing you to re-authenticate every week. Setting your app to "In production" keeps refresh tokens permanently valid. (Google verification is **not** required for personal use; you simply click "Advanced $\rightarrow$ Go to Obsidian Vault Sync (unsafe)" once when signing in).
@@ -129,12 +127,10 @@ To connect Obsidian with your Google Drive, you will set up your own free Google
 1. In Obsidian, open **Settings $\rightarrow$ Google Drive Sync**.
 2. Under **Google Account**:
    - Enter your **Google Client ID** and **Google Client Secret**.
-   - Set **Google Drive OAuth Scope**:
-     - Select **Full Drive Access** (`https://www.googleapis.com/auth/drive`) if using an existing folder.
-     - Select **App-Created Files Only** (`https://www.googleapis.com/auth/drive.file`) if starting fresh.
+   - Keep **Google Drive OAuth Scope** as **App-Created Files Only** (`https://www.googleapis.com/auth/drive.file`).
 3. Click **Connect Account**.
 4. A modal appears displaying your one-time **Device Code** (e.g., `ABCD-EFGH`).
-5. Click **Open Google Login in Browser** (or visit [https://www.google.com/device](https://www.google.com/device) and enter the code).
+5. Open [https://www.google.com/device](https://www.google.com/device) in your browser and enter the code.
 6. Sign in with your Google account and grant permission.
 7. Return to Obsidian: the modal will confirm authorization and display your connected email address.
 
