@@ -596,7 +596,11 @@ var SyncEngine = class {
             d.key
           );
         } catch (err) {
-          errors.push({ key: d.key, error: err.message || String(err) });
+          let errMsg = err.message || String(err);
+          if (/[?:*\"<>|]/.test(d.key)) {
+            errMsg = 'Filename contains characters not supported on this device (? : * " < > |)';
+          }
+          errors.push({ key: d.key, error: errMsg });
         }
       }
     };

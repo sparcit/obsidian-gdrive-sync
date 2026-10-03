@@ -1,6 +1,6 @@
 {
   "name": "obsidian-gdrive-sync",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Two-way synchronization for Obsidian vaults with Google Drive, optimized for Android and desktop.",
   "main": "main.js",
   "scripts": {

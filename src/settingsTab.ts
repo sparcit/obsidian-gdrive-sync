@@ -235,7 +235,14 @@ export class GDriveSyncSettingTab extends PluginSettingTab {
           .setPlaceholder("1//...")
           .setValue(this.plugin.settings.googleDrive.refreshToken)
           .onChange(async (val) => {
-            this.plugin.settings.googleDrive.refreshToken = val.trim();
+            let cleaned = val.trim();
+            const tokenMatch = cleaned.match(/1\s*\/\/\s*[a-zA-Z0-9_\-]+/);
+            if (tokenMatch) {
+              cleaned = tokenMatch[0].replace(/\s+/g, "");
+            } else {
+              cleaned = cleaned.replace(/\s+/g, "");
+            }
+            this.plugin.settings.googleDrive.refreshToken = cleaned;
             this.plugin.settings.googleDrive.accessToken = "";
             this.plugin.settings.googleDrive.accessTokenExpiresAtMs = 0;
             await this.plugin.saveSettings();

@@ -6,3 +6,5 @@ yarn-debug.log*
 yarn-error.log*
 .obsidian/
 scratch/
+client_secret*.json
+*.secret

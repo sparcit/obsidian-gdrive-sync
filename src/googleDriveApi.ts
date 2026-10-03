@@ -101,24 +101,43 @@ export class GoogleDriveApi {
       return this.config.accessToken;
     }
 
+    // Sanitize credentials: strip internal spaces, accidental prefixes, and quotes
+    let cleanToken = (this.config.refreshToken || "").trim();
+    const tokenMatch = cleanToken.match(/1\s*\/\/\s*[a-zA-Z0-9_\-]+/);
+    if (tokenMatch) {
+      cleanToken = tokenMatch[0].replace(/\s+/g, "");
+    } else {
+      cleanToken = cleanToken.replace(/\s+/g, "");
+    }
+    const cleanClientId = (this.config.clientId || "").trim();
+    const cleanClientSecret = (this.config.clientSecret || "").trim();
+
     // Refresh token request
     const params = new URLSearchParams({
-      client_id: this.config.clientId,
+      client_id: cleanClientId,
       grant_type: "refresh_token",
-      refresh_token: this.config.refreshToken,
+      refresh_token: cleanToken,
     });
-    if (this.config.clientSecret) {
-      params.append("client_secret", this.config.clientSecret);
+    if (cleanClientSecret) {
+      params.append("client_secret", cleanClientSecret);
     }
 
-    const resp = await requestUrl({
-      url: "https://oauth2.googleapis.com/token",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: params.toString(),
-    });
+    let resp;
+    try {
+      resp = await requestUrl({
+        url: "https://oauth2.googleapis.com/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: params.toString(),
+      });
+    } catch (err: any) {
+      const msg = err.text || err.message || String(err);
+      throw new Error(
+        `Failed to refresh Google Drive access token: ${GoogleDriveApi.formatGoogleError(msg, err.status)}`
+      );
+    }
 
     if (resp.status !== 200) {
       throw new Error(
@@ -209,7 +228,7 @@ export class GoogleDriveApi {
 
     const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
       query
-    )}&fields=files(id,name)&pageSize=10`;
+    )}&fields=files(id,name,createdTime,modifiedTime)&pageSize=10`;
 
     const searchResp = await requestUrl({
       url: searchUrl,

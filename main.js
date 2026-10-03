@@ -105,22 +105,39 @@ var GoogleDriveApi = class _GoogleDriveApi {
     if (this.config.accessToken && this.config.accessTokenExpiresAtMs > now + 12e4) {
       return this.config.accessToken;
     }
-    const params = new URLSearchParams({
-      client_id: this.config.clientId,
-      grant_type: "refresh_token",
-      refresh_token: this.config.refreshToken
-    });
-    if (this.config.clientSecret) {
-      params.append("client_secret", this.config.clientSecret);
+    let cleanToken = (this.config.refreshToken || "").trim();
+    const tokenMatch = cleanToken.match(/1\s*\/\/\s*[a-zA-Z0-9_\-]+/);
+    if (tokenMatch) {
+      cleanToken = tokenMatch[0].replace(/\s+/g, "");
+    } else {
+      cleanToken = cleanToken.replace(/\s+/g, "");
     }
-    const resp = await (0, import_obsidian.requestUrl)({
-      url: "https://oauth2.googleapis.com/token",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: params.toString()
+    const cleanClientId = (this.config.clientId || "").trim();
+    const cleanClientSecret = (this.config.clientSecret || "").trim();
+    const params = new URLSearchParams({
+      client_id: cleanClientId,
+      grant_type: "refresh_token",
+      refresh_token: cleanToken
     });
+    if (cleanClientSecret) {
+      params.append("client_secret", cleanClientSecret);
+    }
+    let resp;
+    try {
+      resp = await (0, import_obsidian.requestUrl)({
+        url: "https://oauth2.googleapis.com/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: params.toString()
+      });
+    } catch (err) {
+      const msg = err.text || err.message || String(err);
+      throw new Error(
+        `Failed to refresh Google Drive access token: ${_GoogleDriveApi.formatGoogleError(msg, err.status)}`
+      );
+    }
     if (resp.status !== 200) {
       throw new Error(
         `Failed to refresh Google Drive access token: ${_GoogleDriveApi.formatGoogleError(resp.text, resp.status)}`
@@ -185,7 +202,7 @@ var GoogleDriveApi = class _GoogleDriveApi {
     const query = `'${parentId}' in parents and name = '${name.replace(/'/g, "\\'")}' and mimeType = '${FOLDER_MIME}' and trashed = false`;
     const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
       query
-    )}&fields=files(id,name)&pageSize=10`;
+    )}&fields=files(id,name,createdTime,modifiedTime)&pageSize=10`;
     const searchResp = await (0, import_obsidian.requestUrl)({
       url: searchUrl,
       method: "GET",
@@ -1511,7 +1528,11 @@ var SyncEngine = class {
             d.key
           );
         } catch (err) {
-          errors.push({ key: d.key, error: err.message || String(err) });
+          let errMsg = err.message || String(err);
+          if (/[?:*\"<>|]/.test(d.key)) {
+            errMsg = 'Filename contains characters not supported on this device (? : * " < > |)';
+          }
+          errors.push({ key: d.key, error: errMsg });
         }
       }
     };
@@ -2116,7 +2137,14 @@ var GDriveSyncSettingTab = class extends import_obsidian4.PluginSettingTab {
     });
     new import_obsidian4.Setting(advancedDetails).setName("Manual Refresh Token").setDesc("Paste an existing Google OAuth refresh token directly").addText((text) => {
       text.setPlaceholder("1//...").setValue(this.plugin.settings.googleDrive.refreshToken).onChange(async (val) => {
-        this.plugin.settings.googleDrive.refreshToken = val.trim();
+        let cleaned = val.trim();
+        const tokenMatch = cleaned.match(/1\s*\/\/\s*[a-zA-Z0-9_\-]+/);
+        if (tokenMatch) {
+          cleaned = tokenMatch[0].replace(/\s+/g, "");
+        } else {
+          cleaned = cleaned.replace(/\s+/g, "");
+        }
+        this.plugin.settings.googleDrive.refreshToken = cleaned;
         this.plugin.settings.googleDrive.accessToken = "";
         this.plugin.settings.googleDrive.accessTokenExpiresAtMs = 0;
         await this.plugin.saveSettings();
@@ -2478,8 +2506,14 @@ var GDriveSyncPlugin = class extends import_obsidian5.Plugin {
       this.updateRibbonState("success");
       this.updateStatusBar("Synced");
       if (result.errors.length > 0) {
+        const sampleErrors = result.errors.slice(0, 2).map((e) => {
+          const shortKey = e.key.split("/").pop() || e.key;
+          return `"${shortKey}": ${e.error}`;
+        }).join("\n");
         new import_obsidian5.Notice(
-          `Sync completed with ${result.errors.length} errors. Check console for details.`
+          `Sync completed with ${result.errors.length} error(s):
+${sampleErrors}`,
+          8e3
         );
         console.warn("Google Drive Sync errors:", result.errors);
       } else {

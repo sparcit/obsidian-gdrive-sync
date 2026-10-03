@@ -269,8 +269,16 @@ export class GDriveSyncPlugin extends Plugin {
       this.updateStatusBar("Synced");
 
       if (result.errors.length > 0) {
+        const sampleErrors = result.errors
+          .slice(0, 2)
+          .map((e) => {
+            const shortKey = e.key.split("/").pop() || e.key;
+            return `"${shortKey}": ${e.error}`;
+          })
+          .join("\n");
         new Notice(
-          `Sync completed with ${result.errors.length} errors. Check console for details.`
+          `Sync completed with ${result.errors.length} error(s):\n${sampleErrors}`,
+          8000
         );
         console.warn("Google Drive Sync errors:", result.errors);
       } else {
